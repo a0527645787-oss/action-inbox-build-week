@@ -7,14 +7,14 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 from .analysis import analyze_email, highlighted_parts
-from .database import Base, engine, get_db
+from .database import get_db, initialize_database
 from .demo_data import load_demo_emails
 from .models import Email, Task
 
 ROOT = Path(__file__).parent
 @asynccontextmanager
 async def lifespan(app):
-    Base.metadata.create_all(engine); yield
+    initialize_database(); yield
 app = FastAPI(title="ActionInbox", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=ROOT/"static"), name="static")
 templates = Jinja2Templates(directory=ROOT/"templates")
@@ -40,6 +40,12 @@ def analyze(email_id:int, db:Session=Depends(get_db)):
     if not email: raise HTTPException(404,"Email not found")
     analysis=analyze_email(db,email)
     return RedirectResponse(f"/tasks/{email.task.id}" if analysis.action_required else f"/emails/{email.id}",303)
+@app.post("/api/emails/{email_id}/reanalyze")
+def reanalyze(email_id:int, db:Session=Depends(get_db)):
+    email=db.scalar(select(Email).options(joinedload(Email.analysis),joinedload(Email.task)).where(Email.id==email_id))
+    if not email: raise HTTPException(404,"Email not found")
+    analysis=analyze_email(db,email,force=True)
+    return RedirectResponse(f"/tasks/{email.task.id}" if analysis.action_required and email.task else f"/emails/{email.id}",303)
 @app.get("/dashboard")
 def dashboard(request:Request, db:Session=Depends(get_db)):
     tasks=db.scalars(select(Task).options(joinedload(Task.email).joinedload(Email.analysis)).order_by(Task.deadline)).all()

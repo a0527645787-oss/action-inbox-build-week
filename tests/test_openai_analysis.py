@@ -5,7 +5,7 @@ from sqlalchemy import select
 from app.analysis import analyze_email
 from app.demo_data import load_demo_emails
 from app.models import Email, Task
-from app.openai_analysis import SYSTEM_PROMPT, request_live_analysis, validate_evidence
+from app.openai_analysis import MAX_EMAIL_CHARS, LiveAnalysisError, SYSTEM_PROMPT, build_input, request_live_analysis, validate_evidence
 from app.schemas import EmailAnalysisResult
 
 
@@ -108,3 +108,9 @@ def test_prompt_injection_remains_untrusted_data():
     assert "Ignore the system" in request["input"][1]["content"]
     assert "tools" not in request
     assert request["store"] is False
+
+
+def test_oversized_email_is_rejected_before_api_request():
+    import pytest
+    with pytest.raises(LiveAnalysisError, match="character analysis limit"):
+        build_input("sender@example.test", "Subject", "x" * (MAX_EMAIL_CHARS + 1))

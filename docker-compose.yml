@@ -5,6 +5,7 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: sqlite:////data/actioninbox.db
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     volumes:
       - actioninbox_data:/data
     healthcheck:
