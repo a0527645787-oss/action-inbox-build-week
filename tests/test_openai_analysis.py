@@ -5,7 +5,7 @@ from sqlalchemy import select
 from app.analysis import analyze_email
 from app.demo_data import load_demo_emails
 from app.models import Email, Task
-from app.openai_analysis import MAX_EMAIL_CHARS, LiveAnalysisError, SYSTEM_PROMPT, build_input, request_live_analysis, validate_evidence
+from app.openai_analysis import MAX_EMAIL_CHARS, LiveAnalysisError, SYSTEM_PROMPT, build_input, log_openai_exception, request_live_analysis, validate_evidence
 from app.schemas import EmailAnalysisResult
 
 
@@ -114,3 +114,30 @@ def test_oversized_email_is_rejected_before_api_request():
     import pytest
     with pytest.raises(LiveAnalysisError, match="character analysis limit"):
         build_input("sender@example.test", "Subject", "x" * (MAX_EMAIL_CHARS + 1))
+
+
+def test_openai_error_logging_is_diagnostic_and_redacted(caplog, monkeypatch):
+    class FakeAPIError(Exception):
+        status_code = 400
+        message = "Bad request with Bearer sk-test-secret-value and sk-another-secret"
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-secret-value")
+    with caplog.at_level("WARNING", logger="actioninbox.openai"):
+        log_openai_exception(FakeAPIError())
+    log = caplog.text
+    assert "exception_class=FakeAPIError" in log
+    assert "status_code=400" in log
+    assert "Bad request" in log
+    assert "cause_class=unavailable" in log
+    assert "sk-test-secret-value" not in log
+    assert "sk-another-secret" not in log
+
+
+def test_missing_ca_bundle_falls_back_safely(db, monkeypatch):
+    load_demo_emails(db)
+    email = db.scalar(select(Email).where(Email.external_id == "demo-invoice"))
+    monkeypatch.setenv("OPENAI_API_KEY", "test-only-key")
+    monkeypatch.setenv("OPENAI_CA_BUNDLE", "/missing/actioninbox-ca.pem")
+    analysis = analyze_email(db, email)
+    assert analysis.source == "demo_fallback"
+    assert analysis.error_message == "OPENAI_CA_BUNDLE does not point to a readable file"

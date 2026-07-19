@@ -1,8 +1,12 @@
 import os
+import logging
+import re
+from pathlib import Path
 from datetime import datetime
 from urllib.parse import urlparse
 
 from openai import OpenAI
+import httpx
 from pydantic import ValidationError
 
 from .schemas import EmailAnalysisResult
@@ -10,6 +14,7 @@ from .schemas import EmailAnalysisResult
 MODEL = "gpt-5.6"
 MAX_EMAIL_CHARS = 12_000
 REQUEST_TIMEOUT_SECONDS = 25.0
+logger = logging.getLogger("actioninbox.openai")
 
 SYSTEM_PROMPT = """You extract evidence-backed work from email into the required schema.
 
@@ -29,6 +34,32 @@ Return only the strict structured result. All schema fields are required; use nu
 
 class LiveAnalysisError(RuntimeError):
     pass
+
+
+def _safe_error_message(exc: Exception) -> str:
+    if isinstance(exc, ValidationError):
+        return "Structured response validation failed"
+    message = getattr(exc, "message", None) or str(exc) or "No error message provided"
+    message = " ".join(message.split())[:500]
+    api_key = os.getenv("OPENAI_API_KEY")
+    if api_key:
+        message = message.replace(api_key, "[REDACTED]")
+    message = re.sub(r"(?i)Bearer\s+[^\s,;]+", "Bearer [REDACTED]", message)
+    message = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "[REDACTED_API_KEY]", message)
+    return message
+
+
+def log_openai_exception(exc: Exception) -> None:
+    status_code = getattr(exc, "status_code", None)
+    cause = exc.__cause__
+    logger.warning(
+        "OpenAI analysis request failed exception_class=%s status_code=%s message=%s cause_class=%s cause_message=%s",
+        type(exc).__name__,
+        status_code if status_code is not None else "unavailable",
+        _safe_error_message(exc),
+        type(cause).__name__ if cause is not None else "unavailable",
+        _safe_error_message(cause) if cause is not None else "unavailable",
+    )
 
 
 def build_input(sender: str, subject: str, body: str) -> list[dict[str, str]]:
@@ -103,10 +134,18 @@ def validate_evidence(result: EmailAnalysisResult, body: str) -> EmailAnalysisRe
 
 def request_live_analysis(email, client=None) -> EmailAnalysisResult:
     api_key = os.getenv("OPENAI_API_KEY")
+    owns_client = False
     if client is None:
         if not api_key:
             raise LiveAnalysisError("OPENAI_API_KEY is not configured")
-        client = OpenAI(api_key=api_key, timeout=REQUEST_TIMEOUT_SECONDS, max_retries=0)
+        ca_bundle = os.getenv("OPENAI_CA_BUNDLE")
+        http_client = None
+        if ca_bundle:
+            if not Path(ca_bundle).is_file():
+                raise LiveAnalysisError("OPENAI_CA_BUNDLE does not point to a readable file")
+            http_client = httpx.Client(verify=ca_bundle, timeout=REQUEST_TIMEOUT_SECONDS)
+        client = OpenAI(api_key=api_key, timeout=REQUEST_TIMEOUT_SECONDS, max_retries=0, http_client=http_client)
+        owns_client = True
     try:
         response = client.responses.parse(
             model=MODEL,
@@ -121,7 +160,12 @@ def request_live_analysis(email, client=None) -> EmailAnalysisResult:
         if not isinstance(parsed, EmailAnalysisResult):
             parsed = EmailAnalysisResult.model_validate(parsed)
         return validate_evidence(parsed, email.body)
-    except (LiveAnalysisError, ValidationError):
+    except (LiveAnalysisError, ValidationError) as exc:
+        log_openai_exception(exc)
         raise
     except Exception as exc:
+        log_openai_exception(exc)
         raise LiveAnalysisError("OpenAI analysis failed") from exc
+    finally:
+        if owns_client:
+            client.close()
