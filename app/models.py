@@ -27,6 +27,10 @@ class Analysis(Base):
     evidence_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
     evidence_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
     suggestion: Mapped[str | None] = mapped_column(Text, nullable=True)
+    structured_result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[str] = mapped_column(String(30), default="demo_fallback")
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     analyzed_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
     email: Mapped[Email] = relationship(back_populates="analysis")
 

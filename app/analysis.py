@@ -1,26 +1,47 @@
-from dataclasses import dataclass
+import json
+import os
 from datetime import datetime
+
 from sqlalchemy.orm import Session
+
 from .models import Analysis, Email, Task
+from .openai_analysis import LiveAnalysisError, MODEL, request_live_analysis, validate_evidence
+from .schemas import EmailAnalysisResult
 
-@dataclass(frozen=True)
-class Sample:
-    classification: str
-    actionable: bool
-    summary: str
-    title: str | None = None
-    deadline: datetime | None = None
-    deadline_text: str | None = None
-    evidence: str | None = None
-    suggestion: str | None = None
 
-SAMPLES = {
- "demo-invoice":Sample("invoice",True,"Invoice INV-2048 for USD 1,280 needs approval after checking PO-774.","Approve invoice INV-2048",datetime(2026,7,21),"July 21, 2026","Please approve invoice INV-2048 for USD 1,280 by July 21, 2026.","Verify PO-774 in your records, then prepare the invoice for approval."),
- "demo-meeting":Sample("meeting",True,"Choose one of two supplier-review times and bring June delivery metrics.","Choose supplier review time",datetime(2026,7,20),"July 20","Reply with your preferred time by July 20.","Check your availability for both proposed slots before choosing one."),
- "demo-documents":Sample("action_required",True,"Provide a current W-9 and proof of insurance for vendor renewal.","Send vendor renewal documents",datetime(2026,7,24),"July 24, 2026","We need both documents by July 24, 2026.","Locate both documents and report any unavailable item before the deadline."),
- "demo-info":Sample("informational",False,"The employee entrance is closed Sunday morning; use the visitor entrance.",evidence="No response is required.",suggestion="Plan to use the visitor entrance during the maintenance window."),
- "demo-newsletter":Sample("newsletter_noise",False,"A monthly product and design newsletter with an inert reading link.",evidence="You are receiving this monthly newsletter because you subscribed.",suggestion="No action is needed."),
+FALLBACK_RESULTS = {
+    "demo-invoice": {
+        "primary_classification": "invoice", "action_required": True,
+        "summary": "Invoice INV-2048 for USD 1,280 needs approval after checking PO-774.",
+        "tasks": [{"id":"task-1","title":"Approve invoice INV-2048","due_at":"2026-07-21T00:00:00","due_text":"July 21, 2026","uncertainty":None,"evidence_ids":["fact-deadline","fact-amount"]}],
+        "email_facts": [
+            {"id":"fact-deadline","type":"deadline","value":"July 21, 2026","normalized_value":"2026-07-21","confidence":"high","uncertainty":None,"evidence":{"id":"evidence-deadline","exact_quote":"Please approve invoice INV-2048 for USD 1,280 by July 21, 2026.","start_offset":0,"end_offset":67}},
+            {"id":"fact-amount","type":"amount","value":"USD 1,280","normalized_value":"1280 USD","confidence":"high","uncertainty":None,"evidence":{"id":"evidence-amount","exact_quote":"Please approve invoice INV-2048 for USD 1,280 by July 21, 2026.","start_offset":0,"end_offset":67}},
+        ],
+        "resource_guidance": [], "ai_suggestions": [{"type":"next_step","text":"Verify PO-774 in your records, then prepare the invoice for approval.","supporting_fact_ids":["fact-deadline","fact-amount"],"supporting_guidance_ids":[],"uncertainty":None}], "missing_information": []},
+    "demo-meeting": {
+        "primary_classification":"meeting","action_required":True,"summary":"Choose one of two supplier-review times and bring June delivery metrics.",
+        "tasks":[{"id":"task-1","title":"Choose supplier review time","due_at":"2026-07-20T00:00:00","due_text":"July 20","uncertainty":None,"evidence_ids":["fact-deadline"]}],
+        "email_facts":[{"id":"fact-deadline","type":"deadline","value":"July 20","normalized_value":"2026-07-20","confidence":"high","uncertainty":None,"evidence":{"id":"evidence-deadline","exact_quote":"Reply with your preferred time by July 20.","start_offset":119,"end_offset":162}}],
+        "resource_guidance":[],"ai_suggestions":[{"type":"next_step","text":"Check your availability for both proposed slots before choosing one.","supporting_fact_ids":["fact-deadline"],"supporting_guidance_ids":[],"uncertainty":None}],"missing_information":[]},
+    "demo-documents": {
+        "primary_classification":"action_required","action_required":True,"summary":"Provide a current W-9 and proof of insurance for vendor renewal.",
+        "tasks":[{"id":"task-1","title":"Send vendor renewal documents","due_at":"2026-07-24T00:00:00","due_text":"July 24, 2026","uncertainty":None,"evidence_ids":["fact-deadline","fact-w9","fact-insurance"]}],
+        "email_facts":[
+            {"id":"fact-deadline","type":"deadline","value":"July 24, 2026","normalized_value":"2026-07-24","confidence":"high","uncertainty":None,"evidence":{"id":"evidence-deadline","exact_quote":"We need both documents by July 24, 2026.","start_offset":82,"end_offset":125}},
+            {"id":"fact-w9","type":"required_document","value":"W-9 form","normalized_value":None,"confidence":"high","uncertainty":None,"evidence":{"id":"evidence-w9","exact_quote":"send your current W-9 form and proof of insurance","start_offset":32,"end_offset":81}},
+            {"id":"fact-insurance","type":"required_document","value":"proof of insurance","normalized_value":None,"confidence":"high","uncertainty":None,"evidence":{"id":"evidence-insurance","exact_quote":"send your current W-9 form and proof of insurance","start_offset":32,"end_offset":81}}],
+        "resource_guidance":[],"ai_suggestions":[{"type":"next_step","text":"Locate both documents and report any unavailable item before the deadline.","supporting_fact_ids":["fact-deadline","fact-w9","fact-insurance"],"supporting_guidance_ids":[],"uncertainty":None}],"missing_information":[]},
+    "demo-info": {
+        "primary_classification":"informational","action_required":False,"summary":"The employee entrance is closed Sunday morning; use the visitor entrance.","tasks":[],
+        "email_facts":[{"id":"fact-info","type":"other","value":"No response is required","normalized_value":None,"confidence":"high","uncertainty":None,"evidence":{"id":"evidence-info","exact_quote":"No response is required.","start_offset":136,"end_offset":160}}],
+        "resource_guidance":[],"ai_suggestions":[{"type":"next_step","text":"Plan to use the visitor entrance during the maintenance window.","supporting_fact_ids":["fact-info"],"supporting_guidance_ids":[],"uncertainty":None}],"missing_information":[]},
+    "demo-newsletter": {
+        "primary_classification":"newsletter_noise","action_required":False,"summary":"A monthly product and design newsletter with an inert reading link.","tasks":[],
+        "email_facts":[{"id":"fact-link","type":"important_link","value":"https://productweekly.example/july","normalized_value":None,"confidence":"high","uncertainty":None,"evidence":{"id":"evidence-link","exact_quote":"https://productweekly.example/july","start_offset":105,"end_offset":139}}],
+        "resource_guidance":[],"ai_suggestions":[{"type":"next_step","text":"No action is needed.","supporting_fact_ids":[],"supporting_guidance_ids":[],"uncertainty":None}],"missing_information":[]},
 }
+
 
 def evidence_offsets(body, quote):
     start = body.find(quote)
@@ -28,21 +49,68 @@ def evidence_offsets(body, quote):
         raise ValueError("Evidence quote does not exactly match the email body")
     return start, start + len(quote)
 
-def analyze_email(db: Session, email: Email):
-    if email.analysis:
-        return email.analysis
-    sample = SAMPLES[email.external_id]
-    start, end = evidence_offsets(email.body, sample.evidence)
-    analysis = Analysis(email=email, classification=sample.classification, action_required=sample.actionable, summary=sample.summary, evidence_quote=sample.evidence, evidence_start=start, evidence_end=end, suggestion=sample.suggestion)
+
+def fallback_analysis(email: Email) -> EmailAnalysisResult:
+    raw = json.loads(json.dumps(FALLBACK_RESULTS[email.external_id]))
+    for fact in raw["email_facts"]:
+        quote = fact["evidence"]["exact_quote"]
+        start, end = evidence_offsets(email.body, quote)
+        fact["evidence"]["start_offset"] = start
+        fact["evidence"]["end_offset"] = end
+    return validate_evidence(EmailAnalysisResult.model_validate(raw), email.body)
+
+
+def _project_result(db: Session, email: Email, result: EmailAnalysisResult, source: str, error: str | None):
+    facts = {fact.id: fact for fact in result.email_facts}
+    projected_task = result.tasks[0] if result.action_required and result.tasks else None
+    evidence = None
+    if projected_task:
+        evidence = next((facts[item].evidence for item in projected_task.evidence_ids if item in facts), None)
+    if evidence is None and result.email_facts:
+        evidence = result.email_facts[0].evidence
+    suggestion = next((item.text for item in result.ai_suggestions if item.type == "next_step"), None)
+    analysis = Analysis(
+        email=email, classification=result.primary_classification, action_required=bool(projected_task), summary=result.summary,
+        evidence_quote=evidence.exact_quote if evidence else None, evidence_start=evidence.start_offset if evidence else None,
+        evidence_end=evidence.end_offset if evidence else None, suggestion=suggestion,
+        structured_result=result.model_dump_json(), source=source, model=MODEL if source == "live_gpt" else None, error_message=error,
+    )
     db.add(analysis)
-    if sample.actionable:
-        db.add(Task(email=email, title=sample.title, deadline=sample.deadline, deadline_text=sample.deadline_text))
+    if projected_task:
+        deadline = None
+        if projected_task.due_at:
+            deadline = datetime.fromisoformat(projected_task.due_at.replace("Z", "+00:00")).replace(tzinfo=None)
+        db.add(Task(email=email, title=projected_task.title, deadline=deadline, deadline_text=projected_task.due_text))
     email.analyzed = True
     db.commit(); db.refresh(analysis)
     return analysis
 
+
+def analyze_email(db: Session, email: Email, *, force: bool = False, client=None):
+    if email.analysis and not force:
+        return email.analysis
+    if force:
+        if email.task:
+            db.delete(email.task)
+        if email.analysis:
+            db.delete(email.analysis)
+        db.flush()
+    source = "demo_fallback"
+    error = None
+    try:
+        if client is not None or os.getenv("OPENAI_API_KEY"):
+            result = request_live_analysis(email, client=client)
+            source = "live_gpt"
+        else:
+            result = fallback_analysis(email)
+    except Exception as exc:
+        result = fallback_analysis(email)
+        error = str(exc) if isinstance(exc, LiveAnalysisError) else "Live analysis returned invalid output"
+    return _project_result(db, email, result, source, error)
+
+
 def highlighted_parts(email):
-    a = email.analysis
-    if not a or a.evidence_start is None:
+    analysis = email.analysis
+    if not analysis or analysis.evidence_start is None:
         return email.body, "", ""
-    return email.body[:a.evidence_start], email.body[a.evidence_start:a.evidence_end], email.body[a.evidence_end:]
+    return email.body[:analysis.evidence_start], email.body[analysis.evidence_start:analysis.evidence_end], email.body[analysis.evidence_end:]
