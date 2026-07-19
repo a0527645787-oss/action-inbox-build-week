@@ -1,0 +1,16 @@
+services:
+  actioninbox:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: sqlite:////data/actioninbox.db
+    volumes:
+      - actioninbox_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+volumes:
+  actioninbox_data:
