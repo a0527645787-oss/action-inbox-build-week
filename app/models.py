@@ -42,3 +42,14 @@ class Task(Base):
     deadline: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     deadline_text: Mapped[str | None] = mapped_column(String(100), nullable=True)
     email: Mapped[Email] = relationship(back_populates="task")
+
+class BusinessResource(Base):
+    __tablename__ = "business_resources"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(255), unique=True)
+    resource_type: Mapped[str] = mapped_column(String(60))
+    content: Mapped[str] = mapped_column(Text)
+    organization_team: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
