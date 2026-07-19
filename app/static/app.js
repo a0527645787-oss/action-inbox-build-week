@@ -1,0 +1,2 @@
+document.querySelectorAll('[data-jump]').forEach(button=>button.addEventListener('click',()=>{const target=document.getElementById(button.dataset.jump);if(target){target.scrollIntoView({behavior:'smooth',block:'center'});target.classList.add('pulse')}}));
+document.querySelectorAll('form').forEach(form=>form.addEventListener('submit',()=>{const button=form.querySelector('button');button.disabled=true;button.textContent='Analyzing…'}));
