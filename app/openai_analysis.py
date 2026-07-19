@@ -99,23 +99,37 @@ def validate_evidence(result: EmailAnalysisResult, body: str) -> EmailAnalysisRe
 
     clean.email_facts = valid_facts
     fact_by_id = {fact.id: fact for fact in valid_facts}
+    fact_by_evidence_id = {fact.evidence.id: fact for fact in valid_facts}
     valid_tasks = []
     for task in clean.tasks:
-        cited = [fact_by_id[item] for item in task.evidence_ids if item in fact_by_id]
-        valid = bool(task.evidence_ids) and len(cited) == len(set(task.evidence_ids))
+        reasons = []
+        cited = []
+        normalized_evidence_ids = []
+        for item in task.evidence_ids:
+            fact = fact_by_evidence_id.get(item) or fact_by_id.get(item)
+            if fact:
+                cited.append(fact)
+                normalized_evidence_ids.append(fact.evidence.id)
+        if not task.evidence_ids:
+            reasons.append("missing_evidence_ids")
+        if len(cited) != len(task.evidence_ids):
+            reasons.append("unknown_or_rejected_evidence_id")
+        if len(normalized_evidence_ids) != len(set(normalized_evidence_ids)):
+            reasons.append("duplicate_evidence_id")
         if task.due_at or task.due_text:
             deadline_facts = [fact for fact in cited if fact.type == "deadline"]
-            valid = valid and bool(deadline_facts)
-            if task.due_text:
-                valid = valid and any(task.due_text.casefold() in fact.evidence.exact_quote.casefold() for fact in deadline_facts)
+            if not deadline_facts:
+                reasons.append("deadline_without_deadline_evidence")
             if task.due_at:
                 try:
                     datetime.fromisoformat(task.due_at.replace("Z", "+00:00"))
                 except ValueError:
-                    valid = False
-        if valid:
+                    reasons.append("invalid_due_at")
+        if not reasons:
+            task.evidence_ids = normalized_evidence_ids
             valid_tasks.append(task)
         else:
+            logger.warning("Evidence validation rejected task task_id=%s reason=%s", task.id, ",".join(reasons))
             missing.append(f"Rejected task without valid supporting evidence: {task.title}")
 
     clean.tasks = valid_tasks

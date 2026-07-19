@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.analysis import analyze_email
 from app.demo_data import load_demo_emails
@@ -37,7 +37,7 @@ def result_for(body, *, url=None):
         facts.append({"id":"link","type":"important_link","value":url,"normalized_value":None,"confidence":"high","uncertainty":None,"evidence":{"id":"ev-link","exact_quote":quote,"start_offset":start,"end_offset":start+len(quote)}})
     return EmailAnalysisResult.model_validate({
         "primary_classification":"invoice","action_required":True,"summary":"Approval is required.",
-        "tasks":[{"id":"task","title":"Approve payment","due_at":"2026-07-21T00:00:00","due_text":"July 21, 2026","uncertainty":None,"evidence_ids":["deadline"]}],
+        "tasks":[{"id":"task","title":"Approve payment","due_at":"2026-07-21T00:00:00","due_text":"July 21, 2026","uncertainty":None,"evidence_ids":["ev-deadline"]}],
         "email_facts":facts,"resource_guidance":[],
         "ai_suggestions":[{"type":"next_step","text":"Review the payment.","supporting_fact_ids":["deadline"],"supporting_guidance_ids":[],"uncertainty":None}],
         "missing_information":[],
@@ -51,7 +51,7 @@ def test_valid_structured_analysis_is_persisted_as_live(db):
     start = email.body.index(quote)
     output = EmailAnalysisResult.model_validate({
         "primary_classification":"invoice","action_required":True,"summary":"Invoice approval required.",
-        "tasks":[{"id":"task","title":"Approve INV-2048","due_at":"2026-07-21T00:00:00","due_text":"July 21, 2026","uncertainty":None,"evidence_ids":["deadline"]}],
+        "tasks":[{"id":"task","title":"Approve INV-2048","due_at":"2026-07-21T00:00:00","due_text":"July 21, 2026","uncertainty":None,"evidence_ids":["ev"]}],
         "email_facts":[{"id":"deadline","type":"deadline","value":"July 21, 2026","normalized_value":"2026-07-21","confidence":"high","uncertainty":None,"evidence":{"id":"ev","exact_quote":quote,"start_offset":start,"end_offset":start+len(quote)}}],
         "resource_guidance":[],"ai_suggestions":[],"missing_information":[],
     })
@@ -71,15 +71,19 @@ def test_invented_url_is_rejected():
     assert any("important_link" in item for item in clean.missing_information)
 
 
-def test_missing_evidence_rejects_fact_and_task():
+def test_missing_evidence_rejects_fact_and_task(caplog):
     body = "Approve USD 50 by July 21, 2026."
     result = result_for(body)
     result.email_facts[0].evidence.start_offset = 1
-    clean = validate_evidence(result, body)
+    with caplog.at_level("WARNING", logger="actioninbox.openai"):
+        clean = validate_evidence(result, body)
     assert clean.email_facts == []
     assert clean.tasks == []
     assert clean.action_required is False
     assert any("Rejected task" in item for item in clean.missing_information)
+    assert "task_id=task" in caplog.text
+    assert "reason=unknown_or_rejected_evidence_id" in caplog.text
+    assert body not in caplog.text
 
 
 def test_malformed_model_output_uses_demo_fallback(db):
@@ -141,3 +145,36 @@ def test_missing_ca_bundle_falls_back_safely(db, monkeypatch):
     analysis = analyze_email(db, email)
     assert analysis.source == "demo_fallback"
     assert analysis.error_message == "OPENAI_CA_BUNDLE does not point to a readable file"
+
+
+def test_vendor_renewal_live_analysis_creates_one_dashboard_task_on_reanalysis(db):
+    load_demo_emails(db)
+    email = db.scalar(select(Email).where(Email.external_id == "demo-documents"))
+    w9_quote = "current W-9 form"
+    insurance_quote = "proof of insurance"
+    deadline_quote = "We need both documents by July 24, 2026."
+    w9_start = email.body.index(w9_quote)
+    insurance_start = email.body.index(insurance_quote)
+    deadline_start = email.body.index(deadline_quote)
+    output = EmailAnalysisResult.model_validate({
+        "primary_classification":"action_required","action_required":True,
+        "summary":"Current vendor-renewal documents are required by July 24, 2026.",
+        "tasks":[{"id":"vendor-renewal-task","title":"Provide vendor renewal documents","due_at":"2026-07-24T00:00:00","due_text":"2026-07-24","uncertainty":None,"evidence_ids":["fact-w9","fact-insurance","fact-deadline"]}],
+        "email_facts":[
+            {"id":"fact-w9","type":"required_document","value":"current W-9 form","normalized_value":None,"confidence":"high","uncertainty":None,"evidence":{"id":"ev-w9","exact_quote":w9_quote,"start_offset":w9_start,"end_offset":w9_start+len(w9_quote)}},
+            {"id":"fact-insurance","type":"required_document","value":"proof of insurance","normalized_value":None,"confidence":"high","uncertainty":None,"evidence":{"id":"ev-insurance","exact_quote":insurance_quote,"start_offset":insurance_start,"end_offset":insurance_start+len(insurance_quote)}},
+            {"id":"fact-deadline","type":"deadline","value":"July 24, 2026","normalized_value":"2026-07-24","confidence":"high","uncertainty":None,"evidence":{"id":"ev-deadline","exact_quote":deadline_quote,"start_offset":deadline_start,"end_offset":deadline_start+len(deadline_quote)}}
+        ],
+        "resource_guidance":[],"ai_suggestions":[],"missing_information":[],
+    })
+
+    analysis = analyze_email(db, email, client=FakeClient(output))
+    task = db.scalar(select(Task).where(Task.email_id == email.id))
+    assert analysis.action_required is True
+    assert task.title == "Send the current W-9 form and proof of insurance"
+    assert task.deadline_text == "July 24, 2026"
+    assert analysis.evidence_quote == w9_quote
+    assert email.body[analysis.evidence_start:analysis.evidence_end] == w9_quote
+
+    analyze_email(db, email, force=True, client=FakeClient(output))
+    assert db.scalar(select(func.count()).select_from(Task).where(Task.email_id == email.id)) == 1
