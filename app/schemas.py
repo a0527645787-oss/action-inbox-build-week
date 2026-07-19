@@ -42,6 +42,8 @@ class ResourceEvidenceResult(StrictModel):
 
 class ResourceGuidanceResult(StrictModel):
     id: str
+    resource_id: str
+    resource_title: str
     instruction: str
     related_fact_ids: list[str]
     resource_evidence: ResourceEvidenceResult

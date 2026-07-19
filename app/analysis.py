@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from .models import Analysis, Email, Task
 from .openai_analysis import LiveAnalysisError, MODEL, request_live_analysis, validate_evidence
 from .schemas import EmailAnalysisResult
+from .resources import first_resource_sentence, resource_locator, select_relevant_resources
 
 
 FALLBACK_RESULTS = {
@@ -50,14 +51,17 @@ def evidence_offsets(body, quote):
     return start, start + len(quote)
 
 
-def fallback_analysis(email: Email) -> EmailAnalysisResult:
+def fallback_analysis(email: Email, resources=None) -> EmailAnalysisResult:
     raw = json.loads(json.dumps(FALLBACK_RESULTS[email.external_id]))
     for fact in raw["email_facts"]:
         quote = fact["evidence"]["exact_quote"]
         start, end = evidence_offsets(email.body, quote)
         fact["evidence"]["start_offset"] = start
         fact["evidence"]["end_offset"] = end
-    return validate_evidence(EmailAnalysisResult.model_validate(raw), email.body)
+    for index,resource in enumerate(resources or [],1):
+        quote=first_resource_sentence(resource); start,end=resource_locator(resource,quote)
+        raw["resource_guidance"].append({"id":f"guidance-{index}","resource_id":f"resource-{resource.id}","resource_title":resource.title,"instruction":f"Apply the relevant guidance from {resource.title}.","related_fact_ids":[],"resource_evidence":{"exact_quote":quote,"section":resource.organization_team,"start_offset":start,"end_offset":end}})
+    return validate_evidence(EmailAnalysisResult.model_validate(raw), email.body, resources)
 
 
 def _evidence_backed_task_title(task, result: EmailAnalysisResult) -> str:
@@ -138,14 +142,15 @@ def analyze_email(db: Session, email: Email, *, force: bool = False, client=None
         db.flush()
     source = "demo_fallback"
     error = None
+    resources=select_relevant_resources(db,email)
     try:
         if client is not None or os.getenv("OPENAI_API_KEY"):
-            result = request_live_analysis(email, client=client)
+            result = request_live_analysis(email, client=client, resources=resources)
             source = "live_gpt"
         else:
-            result = fallback_analysis(email)
+            result = fallback_analysis(email,resources)
     except Exception as exc:
-        result = fallback_analysis(email)
+        result = fallback_analysis(email,resources)
         error = str(exc) if isinstance(exc, LiveAnalysisError) else "Live analysis returned invalid output"
     return _project_result(db, email, result, source, error)
 
