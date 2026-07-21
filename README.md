@@ -14,6 +14,7 @@ python -m venv .venv
 # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
 copy .env.example .env  # optional on Windows; add OPENAI_API_KEY for live analysis
+alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
@@ -49,5 +50,21 @@ The fallback analysis is deterministic sample data. With `OPENAI_API_KEY` config
 
 - `OPENAI_API_KEY` — optional; enables live GPT-5.6 analysis. Read only by the backend.
 - `DATABASE_URL` — optional; defaults to `sqlite:///./actioninbox.db`.
+- `LOCAL_DEMO_AUTH_ENABLED` — set explicitly to `true` for local/demo use. If it is absent or false, application routes fail closed until a real authentication dependency is configured. Public registration is not implemented.
+
+Supported database URL shapes:
+
+```text
+sqlite:///./actioninbox.db
+mysql+pymysql://app-user:replace-me@db-host:3306/actioninbox?charset=utf8mb4
+```
+
+Use environment-managed credentials in hosted environments; never commit them. Apply schema changes before starting a release:
+
+```bash
+alembic upgrade head
+```
+
+The Docker image performs this migration before starting Uvicorn. The optional Compose MySQL validation stack is available with `docker compose --profile mysql up --build mysql actioninbox-mysql`; it serves the MySQL-backed app on port 8001.
 
 Live analysis uses a 60-second request timeout, disables response storage, does not enable tools, and rejects email bodies longer than 12,000 characters. Pasted resources are limited to 12,000 characters each and selected resource context is capped at 18,000 characters. Email and resource text are treated as untrusted data. Links are inert text and are never opened or fetched.

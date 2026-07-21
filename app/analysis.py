@@ -113,7 +113,7 @@ def _project_result(db: Session, email: Email, result: EmailAnalysisResult, sour
         evidence = result.email_facts[0].evidence
     suggestion = next((item.text for item in result.ai_suggestions if item.type == "next_step"), None)
     analysis = Analysis(
-        email=email, classification=result.primary_classification, action_required=bool(projected_task), summary=result.summary,
+        email=email, user_id=email.user_id, classification=result.primary_classification, action_required=bool(projected_task), summary=result.summary,
         evidence_quote=evidence.exact_quote if evidence else None, evidence_start=evidence.start_offset if evidence else None,
         evidence_end=evidence.end_offset if evidence else None, suggestion=suggestion,
         structured_result=result.model_dump_json(), source=source, model=MODEL if source == "live_gpt" else None, error_message=error,
@@ -125,7 +125,7 @@ def _project_result(db: Session, email: Email, result: EmailAnalysisResult, sour
             deadline = datetime.fromisoformat(projected_task.due_at.replace("Z", "+00:00")).replace(tzinfo=None)
         title = _evidence_backed_task_title(projected_task, result)
         deadline_text = _evidence_backed_deadline_text(projected_task, result)
-        db.add(Task(email=email, title=title, deadline=deadline, deadline_text=deadline_text))
+        db.add(Task(email=email, user_id=email.user_id, title=title, deadline=deadline, deadline_text=deadline_text))
     email.analyzed = True
     db.commit(); db.refresh(analysis)
     return analysis

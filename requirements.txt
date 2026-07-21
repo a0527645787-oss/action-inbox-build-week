@@ -6,3 +6,5 @@ pytest==8.4.1
 httpx==0.28.1
 openai==2.46.0
 python-multipart==0.0.20
+alembic==1.16.4
+PyMySQL==1.1.1

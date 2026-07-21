@@ -1,7 +1,7 @@
 import re
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from .models import BusinessResource, Email
+from .models import BusinessResource, Email, User
 
 RESOURCE_TYPES = ["procedure", "policy", "role_directory", "template", "instruction"]
 MAX_RESOURCE_CHARS = 12_000
@@ -13,10 +13,15 @@ DEMO_RESOURCES = [
 ]
 STOPWORDS = {"the","and","for","from","with","this","that","your","must","before","after","within","into","are","our","has","have"}
 
-def seed_demo_resources(db: Session):
-    existing=set(db.scalars(select(BusinessResource.title)).all())
+def seed_demo_resources(db: Session, user: User | None = None):
+    from .auth import DEMO_USER_ID, ensure_demo_user
+    if user is None:
+        user = ensure_demo_user(db)
+    if user.id != DEMO_USER_ID:
+        raise ValueError("Demo resources may only be seeded for the dedicated demo user")
+    existing=set(db.scalars(select(BusinessResource.title).where(BusinessResource.user_id == user.id)).all())
     for data in DEMO_RESOURCES:
-        if data["title"] not in existing: db.add(BusinessResource(**data,enabled=True))
+        if data["title"] not in existing: db.add(BusinessResource(**data,enabled=True,user_id=user.id))
     db.commit()
 
 def _terms(text):
@@ -24,7 +29,7 @@ def _terms(text):
 
 def select_relevant_resources(db:Session,email:Email,limit=3):
     email_terms=_terms(f"{email.subject} {email.body}")
-    resources=db.scalars(select(BusinessResource).where(BusinessResource.enabled.is_(True)).order_by(BusinessResource.id)).all()
+    resources=db.scalars(select(BusinessResource).where(BusinessResource.user_id == email.user_id, BusinessResource.enabled.is_(True)).order_by(BusinessResource.id)).all()
     scored=[]
     for resource in resources:
         title_terms=_terms(f"{resource.title} {resource.resource_type} {resource.organization_team or ''}")

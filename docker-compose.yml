@@ -5,6 +5,7 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: sqlite:////data/actioninbox.db
+      LOCAL_DEMO_AUTH_ENABLED: ${LOCAL_DEMO_AUTH_ENABLED:-true}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_CA_BUNDLE: ${OPENAI_CA_BUNDLE:-}
     volumes:
@@ -14,5 +15,38 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+  mysql:
+    image: mysql:8.4
+    profiles: ["mysql"]
+    environment:
+      MYSQL_DATABASE: actioninbox
+      MYSQL_USER: actioninbox
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-pilot-test-password}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-pilot-test-root-password}
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uactioninbox -p\"$$MYSQL_PASSWORD\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - mysql_data:/var/lib/mysql
+  actioninbox-mysql:
+    build: .
+    profiles: ["mysql"]
+    ports:
+      - "8001:8000"
+    environment:
+      DATABASE_URL: mysql+pymysql://actioninbox:${MYSQL_PASSWORD:-pilot-test-password}@mysql:3306/actioninbox?charset=utf8mb4
+      LOCAL_DEMO_AUTH_ENABLED: "true"
+      OPENAI_API_KEY: ""
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 volumes:
   actioninbox_data:
+  mysql_data:
