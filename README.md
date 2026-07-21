@@ -97,3 +97,10 @@ pytest
 ```
 
 The MySQL integration test is opt-in through its documented test environment variables. All OpenAI API calls are mocked in automated tests.
+# Production HTTPS
+
+The emergency AWS deployment is served at
+`https://actioninbox.16-192-83-71.nip.io`. TLS is terminated by the existing
+Nginx container with a Let's Encrypt certificate; MySQL remains private on the
+internal Docker network. Deployment and renewal details are in
+`deploy/README.md`.

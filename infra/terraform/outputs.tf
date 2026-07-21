@@ -11,5 +11,5 @@ output "elastic_ip" {
 }
 
 output "public_url" {
-  value = "http://${aws_eip.actioninbox.public_ip}"
+  value = "https://actioninbox.${replace(aws_eip.actioninbox.public_ip, ".", "-")}.nip.io"
 }
