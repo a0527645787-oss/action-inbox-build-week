@@ -11,7 +11,8 @@ from app.auth import ensure_demo_user, get_current_user
 from app.database import get_db
 from app.gmail import GMAIL_QUERY, GMAIL_SCOPE, encrypt_tokens, sync_gmail
 from app.main import app
-from app.models import Email, GmailCredential, Task
+from app.models import Analysis, Email, GmailCredential, Task
+from app.triage import triage_unanalyzed_emails
 
 
 class FakeResponse:
@@ -122,20 +123,66 @@ def test_supported_synthetic_email_still_uses_deterministic_fallback(db, monkeyp
     assert email.task is not None
 
 
-def test_mcp_requires_auth_and_all_tools_are_read_only(db, monkeypatch):
+def test_public_mcp_is_no_auth_read_only_and_synthetic_demo_only(db, monkeypatch):
+    from app.demo_data import ingest_demo_emails
+
     user = ensure_demo_user(db)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    ingest_demo_emails(db, user)
+    triage_unanalyzed_emails(db, user.id)
+    demo_task = db.scalar(select(Task).join(Task.email).where(Email.source == "demo"))
+
+    private_email = Email(user_id=user.id, external_id="gmail:private", gmail_message_id="private-gmail-id",
+                          sender="private@example.test", subject="PRIVATE GMAIL SUBJECT",
+                          received_at=datetime.now(UTC).replace(tzinfo=None), body="PRIVATE GMAIL BODY",
+                          source="gmail", analyzed=True)
+    db.add(private_email); db.flush()
+    db.add(Analysis(user_id=user.id, email_id=private_email.id, classification="action_required",
+                    action_required=True, summary="PRIVATE GMAIL SUMMARY",
+                    structured_result=demo_task.email.analysis.structured_result, source="live_gpt"))
+    private_task = Task(user_id=user.id, email_id=private_email.id, title="PRIVATE GMAIL TASK")
+    db.add(private_task); db.commit(); db.refresh(private_task)
+
     monkeypatch.setenv("MCP_ACCESS_TOKEN", "mcp-test-token")
     monkeypatch.setenv("MCP_USER_ID", user.id)
     app.dependency_overrides[get_db] = _override_db(db)
     try:
         client = TestClient(app)
-        assert client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).status_code == 401
-        response = client.post("/mcp", headers={"Authorization": "Bearer mcp-test-token"}, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        initialize = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}})
+        assert initialize.status_code == 200
+        assert initialize.json()["result"]["capabilities"]["tools"] == {"listChanged": False}
+
+        response = client.post("/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         assert response.status_code == 200
         tools = response.json()["result"]["tools"]
         assert {item["name"] for item in tools} == {"list_actioninbox_tasks", "get_actioninbox_task", "prepare_task_execution"}
         assert all(item["annotations"]["readOnlyHint"] is True for item in tools)
         assert all(item["annotations"]["destructiveHint"] is False for item in tools)
+        assert all(item["annotations"]["idempotentHint"] is True for item in tools)
+        assert all(item["annotations"]["openWorldHint"] is False for item in tools)
+        assert all(item["securitySchemes"] == [{"type": "noauth"}] for item in tools)
+
+        public_list = client.post("/mcp", json={"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                                  "params": {"name": "list_actioninbox_tasks", "arguments": {}}})
+        public_text = public_list.text
+        assert public_list.status_code == 200 and "PRIVATE GMAIL" not in public_text
+        assert demo_task.title in public_text
+
+        hidden = client.post("/mcp", json={"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                             "params": {"name": "get_actioninbox_task", "arguments": {"task_id": private_task.id}}})
+        assert hidden.json()["error"]["message"] == "Task not found"
+
+        prepared = client.post("/mcp", json={"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                               "params": {"name": "prepare_task_execution", "arguments": {"task_id": demo_task.id}}})
+        package = prepared.json()["result"]["structuredContent"]
+        assert package["review_required"] is True and package["executed"] is False
+
+        assert client.post("/mcp", headers={"Authorization": "Bearer wrong"},
+                           json={"jsonrpc": "2.0", "id": 6, "method": "tools/list"}).status_code == 401
+        authenticated = client.post("/mcp", headers={"Authorization": "Bearer mcp-test-token"},
+                                    json={"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                                          "params": {"name": "get_actioninbox_task", "arguments": {"task_id": private_task.id}}})
+        assert authenticated.status_code == 200 and "PRIVATE GMAIL SUMMARY" in authenticated.text
     finally:
         app.dependency_overrides.clear()
 

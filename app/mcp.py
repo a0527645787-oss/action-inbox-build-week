@@ -7,6 +7,8 @@ from fastapi.responses import JSONResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
+from .auth import DEMO_USER_ID
+from .demo_data import DEMO_EMAILS
 from .execution import build_execution_package, parse_structured_result
 from .models import Email, Task
 
@@ -14,21 +16,26 @@ from .models import Email, Task
 PROTOCOL_VERSION = "2025-03-26"
 
 
-def _tool(name: str, description: str, schema: dict) -> dict:
+DEMO_EXTERNAL_IDS = {item["external_id"] for item in DEMO_EMAILS}
+
+
+def _tool(name: str, description: str, schema: dict, *, public_demo: bool) -> dict:
     annotations = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
-    security = [{"type": "http", "scheme": "bearer"}]
+    security = [{"type": "noauth"}] if public_demo else [{"type": "http", "scheme": "bearer"}]
     return {"name": name, "description": description, "inputSchema": schema, "annotations": annotations,
             "securitySchemes": security, "_meta": {"securitySchemes": security}}
 
 
-TOOLS = [
-    _tool("list_actioninbox_tasks", "List the current user's evidence-backed ActionInbox tasks. Returns no full email bodies.",
-          {"type": "object", "properties": {}, "additionalProperties": False}),
-    _tool("get_actioninbox_task", "Get one owned task with its summary and exact supporting evidence, without the full email body.",
-          {"type": "object", "properties": {"task_id": {"type": "integer", "minimum": 1}}, "required": ["task_id"], "additionalProperties": False}),
-    _tool("prepare_task_execution", "Prepare a review-only execution package. This never executes, sends, or modifies anything.",
-          {"type": "object", "properties": {"task_id": {"type": "integer", "minimum": 1}, "target": {"type": "string", "enum": ["CHATGPT_WORK", "CODEX"]}}, "required": ["task_id"], "additionalProperties": False}),
-]
+def _tools(public_demo: bool) -> list[dict]:
+    scope = "synthetic demo" if public_demo else "authenticated user's"
+    return [
+        _tool("list_actioninbox_tasks", f"List {scope} evidence-backed ActionInbox tasks. Returns no full email bodies.",
+              {"type": "object", "properties": {}, "additionalProperties": False}, public_demo=public_demo),
+        _tool("get_actioninbox_task", f"Get one {scope} task with its summary and exact supporting evidence, without the full email body.",
+              {"type": "object", "properties": {"task_id": {"type": "integer", "minimum": 1}}, "required": ["task_id"], "additionalProperties": False}, public_demo=public_demo),
+        _tool("prepare_task_execution", f"Prepare a review-only package for one {scope} task. This never executes, sends, or modifies anything.",
+              {"type": "object", "properties": {"task_id": {"type": "integer", "minimum": 1}, "target": {"type": "string", "enum": ["CHATGPT_WORK", "CODEX"]}}, "required": ["task_id"], "additionalProperties": False}, public_demo=public_demo),
+    ]
 
 
 def _response(request_id, result=None, error=None, status=200):
@@ -40,8 +47,15 @@ def _response(request_id, result=None, error=None, status=200):
     return JSONResponse(payload, status_code=status)
 
 
-def _owned_task(db: Session, task_id: int, user_id: str) -> Task | None:
-    return db.scalar(select(Task).options(joinedload(Task.email).joinedload(Email.analysis)).where(Task.id == task_id, Task.user_id == user_id))
+def _task_scope(db: Session, user_id: str, public_demo: bool):
+    query = select(Task).join(Task.email).options(joinedload(Task.email).joinedload(Email.analysis)).where(Task.user_id == user_id)
+    if public_demo:
+        query = query.where(Email.source == "demo", Email.external_id.in_(DEMO_EXTERNAL_IDS))
+    return query
+
+
+def _owned_task(db: Session, task_id: int, user_id: str, public_demo: bool) -> Task | None:
+    return db.scalar(_task_scope(db, user_id, public_demo).where(Task.id == task_id))
 
 
 def _task_view(task: Task) -> dict:
@@ -55,8 +69,12 @@ def _task_view(task: Task) -> dict:
 async def handle_mcp(request: Request, db: Session):
     configured = os.getenv("MCP_ACCESS_TOKEN", "")
     supplied = request.headers.get("authorization", "")
-    if not configured or not supplied.startswith("Bearer ") or not secrets.compare_digest(supplied[7:], configured):
-        return JSONResponse({"error": "MCP authentication required"}, status_code=401, headers={"WWW-Authenticate": 'Bearer realm="ActionInbox MCP"'})
+    authenticated = False
+    if supplied:
+        if not configured or not supplied.startswith("Bearer ") or not secrets.compare_digest(supplied[7:], configured):
+            return JSONResponse({"error": "MCP authentication required"}, status_code=401, headers={"WWW-Authenticate": 'Bearer realm="ActionInbox MCP"'})
+        authenticated = True
+    public_demo = not authenticated
     try:
         body = await request.json()
     except ValueError:
@@ -68,20 +86,20 @@ async def handle_mcp(request: Request, db: Session):
     if method == "notifications/initialized":
         return Response(status_code=202)
     if method == "tools/list":
-        return _response(request_id, {"tools": TOOLS})
+        return _response(request_id, {"tools": _tools(public_demo)})
     if method != "tools/call":
         return _response(request_id, error={"code": -32601, "message": "Method not found"})
     params = body.get("params", {}); name = params.get("name"); arguments = params.get("arguments") or {}
-    user_id = os.getenv("MCP_USER_ID", "00000000-0000-0000-0000-000000000001")
+    user_id = DEMO_USER_ID if public_demo else os.getenv("MCP_USER_ID", DEMO_USER_ID)
     if name == "list_actioninbox_tasks":
-        tasks = db.scalars(select(Task).options(joinedload(Task.email).joinedload(Email.analysis)).where(Task.user_id == user_id).order_by(Task.deadline)).all()
+        tasks = db.scalars(_task_scope(db, user_id, public_demo).order_by(Task.deadline)).all()
         data = [{"id": task.id, "title": task.title, "deadline": task.deadline_text, "summary": task.email.analysis.summary} for task in tasks]
     elif name in {"get_actioninbox_task", "prepare_task_execution"}:
         try:
             task_id = int(arguments["task_id"])
         except (KeyError, TypeError, ValueError):
             return _response(request_id, error={"code": -32602, "message": "A valid task_id is required"})
-        task = _owned_task(db, task_id, user_id)
+        task = _owned_task(db, task_id, user_id, public_demo)
         if not task:
             return _response(request_id, error={"code": -32602, "message": "Task not found"})
         if name == "get_actioninbox_task":
