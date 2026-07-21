@@ -26,6 +26,13 @@ services:
       DATABASE_URL: mysql+pymysql://${MYSQL_USER:?MYSQL_USER is required}:${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}@mysql:3306/${MYSQL_DATABASE:?MYSQL_DATABASE is required}?charset=utf8mb4
       LOCAL_DEMO_AUTH_ENABLED: "true"
       OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY is required}
+      GMAIL_CLIENT_ID: ${GMAIL_CLIENT_ID:?GMAIL_CLIENT_ID is required}
+      GMAIL_CLIENT_SECRET: ${GMAIL_CLIENT_SECRET:?GMAIL_CLIENT_SECRET is required}
+      GMAIL_REDIRECT_URI: https://actioninbox.16-192-83-71.nip.io/auth/google/callback
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:?TOKEN_ENCRYPTION_KEY is required}
+      MCP_ACCESS_TOKEN: ${MCP_ACCESS_TOKEN:?MCP_ACCESS_TOKEN is required}
+      MCP_USER_ID: "00000000-0000-0000-0000-000000000001"
+      REPOSITORY_ORIGIN: https://github.com/a0527645787-oss/action-inbox-build-week.git
     depends_on:
       mysql:
         condition: service_healthy

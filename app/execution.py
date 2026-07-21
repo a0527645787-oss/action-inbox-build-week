@@ -1,6 +1,8 @@
 import json
+import os
 import re
 from typing import Any
+from urllib.parse import urlencode
 
 from .models import Task
 from .schemas import EmailAnalysisResult
@@ -71,3 +73,23 @@ def build_execution_package(task: Task, result: EmailAnalysisResult, target_exec
 
 def package_as_text(package: dict) -> str:
     return json.dumps(package, indent=2, ensure_ascii=False)
+
+
+def build_review_prompt(task: Task, result: EmailAnalysisResult, target: str) -> str:
+    package = build_execution_package(task, result, target)
+    facts = "\n".join(
+        f"- {item['type']}: {item['value']} — exact evidence: {item['evidence']['exact_quote']}"
+        for item in package["verified_email_facts"]
+    )
+    return _redact(
+        f"Review and prepare this ActionInbox task; do not execute external actions.\n\n"
+        f"Task: {task.title}\nSummary: {task.email.analysis.summary}\n\nVerified evidence:\n{facts}\n\n"
+        "Prepare the proposed deliverable using the supplied facts and safety constraints. "
+        "Clearly identify missing information. Stop before sending, publishing, paying, deploying, "
+        "or modifying any external system and ask for explicit user approval."
+    )
+
+
+def codex_deep_link(task: Task, result: EmailAnalysisResult) -> str:
+    origin = os.getenv("REPOSITORY_ORIGIN", "https://github.com/a0527645787-oss/action-inbox-build-week.git")
+    return "codex://new?" + urlencode({"prompt": build_review_prompt(task, result, "CODEX"), "repo": origin})

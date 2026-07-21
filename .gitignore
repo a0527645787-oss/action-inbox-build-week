@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 .tmp-pytest-*/
 .venv/
+.test-deps/
 .env
 .env.local
 .env.*.local
@@ -15,6 +16,9 @@ __pycache__/
 *.key
 *.pfx
 *.p12
+client_secret*.json
+*oauth*credentials*.json
+google-credentials*.json
 *.tmp
 *.temp
 .idea/

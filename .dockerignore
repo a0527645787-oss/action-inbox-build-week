@@ -1,11 +1,12 @@
 .git
 .venv
+.test-deps
 __pycache__
 .pytest_cache
 .tmp-pytest-*
 *.db
 .env
-.terraform
+**/.terraform
 *.tfstate
 *.tfstate.*
 *.tfplan

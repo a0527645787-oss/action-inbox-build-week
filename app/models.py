@@ -25,6 +25,7 @@ class Email(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "external_id", name="uq_emails_user_external_id"),
         UniqueConstraint("user_id", "id", name="uq_emails_user_id_id"),
+        UniqueConstraint("user_id", "gmail_message_id", name="uq_emails_user_gmail_message"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -35,6 +36,8 @@ class Email(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime)
     body: Mapped[str] = mapped_column(Text)
     source: Mapped[str] = mapped_column(String(30), default="demo")
+    gmail_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    gmail_thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     analyzed: Mapped[bool] = mapped_column(Boolean, default=False)
     analysis: Mapped["Analysis | None"] = relationship(back_populates="email", cascade="all, delete-orphan", uselist=False)
     task: Mapped["Task | None"] = relationship(back_populates="email", cascade="all, delete-orphan", uselist=False)
@@ -108,3 +111,14 @@ class GmailCredential(Base):
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class GmailOAuthState(Base):
+    __tablename__ = "gmail_oauth_states"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    state_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

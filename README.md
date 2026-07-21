@@ -97,6 +97,27 @@ pytest
 ```
 
 The MySQL integration test is opt-in through its documented test environment variables. All OpenAI API calls are mocked in automated tests.
+
+## Bounded Gmail ingestion
+
+Gmail is optional and read-only. A user starts every sync manually. The server
+queries `INBOX` with `newer_than:7d`, requests at most 25 message IDs, excludes
+Spam and Trash, and creates at most 20 new tasks. Stored Gmail message IDs make
+repeat syncs idempotent. The integration never sends, labels, archives, deletes,
+or marks messages as read.
+
+OAuth configuration is server-side only: `GMAIL_CLIENT_ID`,
+`GMAIL_CLIENT_SECRET`, `GMAIL_REDIRECT_URI`, and `TOKEN_ENCRYPTION_KEY`. Never
+place the downloaded Google credentials JSON in the repository.
+
+## Work and Codex
+
+The authenticated HTTPS `/mcp` endpoint exposes three read-only tools:
+`list_actioninbox_tasks`, `get_actioninbox_task`, and
+`prepare_task_execution`. Configure `MCP_ACCESS_TOKEN` and `MCP_USER_ID` on the
+server. Task pages can copy a review-first prompt for Work or open the supported
+`codex://new` deep link with a prefilled prompt and repository origin. Neither
+path executes an external action automatically.
 # Production HTTPS
 
 The emergency AWS deployment is served at

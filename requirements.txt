@@ -8,3 +8,4 @@ openai==2.46.0
 python-multipart==0.0.20
 alembic==1.16.4
 PyMySQL==1.1.1
+cryptography==45.0.5

@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}Work & Codex · ActionInbox{% endblock %}
+{% block content %}
+<div class="heading"><div><span class="eyebrow">Review-first handoff</span><h1>Work &amp; Codex</h1><p>ActionInbox prepares evidence-backed context. It never executes automatically.</p></div></div>
+<section class="card section-stack"><h2>ChatGPT Work connection</h2><p>Add ActionInbox as a custom MCP connection using this authenticated production endpoint:</p><code class="endpoint">{{ mcp_url }}</code><ul><li>list_actioninbox_tasks</li><li>get_actioninbox_task</li><li>prepare_task_execution</li></ul><div class="notice"><strong>Review required.</strong> Prepared packages never send, publish, pay, deploy, or modify external systems.</div></section>
+<section class="card section-stack"><h2>Codex handoff</h2><p>Open a task and choose <strong>Open in Codex</strong>. The deep link prefills verified evidence and repository origin. You review and explicitly send the prompt.</p></section>
+{% endblock %}

@@ -12,8 +12,10 @@ from .analysis import analyze_email, highlighted_parts
 from .auth import get_current_user
 from .database import get_db
 from .demo_data import ingest_demo_emails
-from .execution import PACKAGE_EXECUTORS, build_execution_package, package_as_text, parse_structured_result
-from .models import BusinessResource, Email, Task, User
+from .execution import PACKAGE_EXECUTORS, build_execution_package, build_review_prompt, codex_deep_link, package_as_text, parse_structured_result
+from .gmail import GMAIL_MESSAGE_LIMIT, GMAIL_QUERY, GMAIL_SCOPE, GMAIL_TASK_LIMIT, GmailSyncError, begin_oauth, complete_oauth, gmail_configured, sync_gmail
+from .mcp import handle_mcp
+from .models import BusinessResource, Email, GmailCredential, Task, User
 from .resources import MAX_RESOURCE_CHARS, RESOURCE_TYPES, seed_demo_resources
 from .triage import triage_unanalyzed_emails
 
@@ -56,6 +58,53 @@ def inbox(request: Request, db: Session = Depends(get_db), current_user: User = 
         select(Email).where(Email.user_id == current_user.id).order_by(Email.received_at.desc())
     ).all()
     return templates.TemplateResponse(request, "inbox.html", {"emails": emails})
+
+
+@app.get("/gmail")
+def gmail_page(request: Request, candidates: int = 0, imported: int = 0, tasks_created: int = 0,
+               db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    credential = db.scalar(select(GmailCredential).where(GmailCredential.user_id == current_user.id).order_by(GmailCredential.updated_at.desc()))
+    return templates.TemplateResponse(request, "gmail.html", {"credential": credential, "configured": gmail_configured(),
+        "scope": GMAIL_SCOPE, "query": GMAIL_QUERY, "message_limit": GMAIL_MESSAGE_LIMIT, "task_limit": GMAIL_TASK_LIMIT,
+        "candidates": max(candidates, 0), "imported": max(imported, 0), "tasks_created": max(tasks_created, 0)})
+
+
+@app.get("/auth/google/start")
+def gmail_oauth_start(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return RedirectResponse(begin_oauth(db, current_user), 303)
+
+
+@app.get("/auth/google/callback")
+def gmail_oauth_callback(state: str, code: str = "", error: str = "", db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if error or not code:
+        raise HTTPException(400, "Google authorization was not completed")
+    try:
+        complete_oauth(db, current_user, state, code)
+    except GmailSyncError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return RedirectResponse("/gmail", 303)
+
+
+@app.post("/gmail/sync")
+def gmail_sync(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    credential = db.scalar(select(GmailCredential).where(GmailCredential.user_id == current_user.id).order_by(GmailCredential.updated_at.desc()))
+    if not credential:
+        raise HTTPException(409, "Connect Gmail before syncing")
+    try:
+        result = sync_gmail(db, current_user, credential)
+    except GmailSyncError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return RedirectResponse(f"/gmail?candidates={result.candidates}&imported={result.new_messages}&tasks_created={result.tasks_created}", 303)
+
+
+@app.post("/mcp")
+async def mcp_endpoint(request: Request, db: Session = Depends(get_db)):
+    return await handle_mcp(request, db)
+
+
+@app.get("/integrations")
+def integrations_page(request: Request, current_user: User = Depends(get_current_user)):
+    return templates.TemplateResponse(request, "integrations.html", {"mcp_url": "https://actioninbox.16-192-83-71.nip.io/mcp"})
 
 
 @app.post("/api/inbox/analyze-all")
@@ -147,7 +196,9 @@ def task_detail(task_id: int, request: Request, db: Session = Depends(get_db), c
         if not isinstance(start, int) or not isinstance(end, int) or resource.content[start:end] != quote:
             continue
         guidance_views.append({"guidance": guidance, "resource": resource, "before": resource.content[:start], "quote": quote, "after": resource.content[end:]})
-    return templates.TemplateResponse(request, "task.html", {"task": task, "before": before, "evidence": evidence, "after": after, "guidance_views": guidance_views, "result": result, "execution": result.execution_guidance})
+    work_prompt = build_review_prompt(task, result, "CHATGPT_WORK") if result.execution_guidance else None
+    codex_url = codex_deep_link(task, result) if result.execution_guidance else None
+    return templates.TemplateResponse(request, "task.html", {"task": task, "before": before, "evidence": evidence, "after": after, "guidance_views": guidance_views, "result": result, "execution": result.execution_guidance, "work_prompt": work_prompt, "codex_url": codex_url})
 
 
 @app.get("/tasks/{task_id}/execution-package", response_class=HTMLResponse)
