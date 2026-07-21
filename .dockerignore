@@ -5,3 +5,7 @@ __pycache__
 .tmp-pytest-*
 *.db
 .env
+.terraform
+*.tfstate
+*.tfstate.*
+*.tfplan

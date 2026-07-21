@@ -27,6 +27,8 @@
 - No model or migration change was needed for this feature.
 - SQLite local/test behavior and the MySQL/Alembic direction remain unchanged.
 - Migration verification must use a fresh isolated database only.
+- The emergency AWS deployment runs MySQL 8.4 in a separate container with a persistent named volume; deployed `DATABASE_URL` is required to use `mysql+pymysql`.
+- RDS MySQL is intentionally deferred for the emergency deployment and remains on the full hosted architecture roadmap.
 
 ## Verification
 

@@ -22,3 +22,12 @@ __pycache__/
 .local-certs/
 docker-compose.override.yml
 sesion_ID.txt
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json

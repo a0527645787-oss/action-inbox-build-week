@@ -82,6 +82,14 @@ docker compose --profile mysql up --build
 
 Never run migration validation against an existing database or volume; create a fresh isolated Compose project instead.
 
+## Emergency AWS deployment
+
+The emergency hosted architecture uses one small Ubuntu EC2 instance, an Elastic IP, Nginx, the ActionInbox container, and a separate MySQL 8.4 container with a persistent named Docker volume. Only Nginx publishes a web port; MySQL is reachable only through an internal Docker network. Deployment secrets live only in a mode-`600` environment file on the instance and are not managed by Terraform.
+
+Terraform lives in `infra/terraform`, and the production Compose/Nginx configuration lives in `deploy`. The emergency deployment intentionally does not create RDS. Managed RDS MySQL remains the planned production architecture after the Build Week emergency deployment is stabilized.
+
+The AWS deployment uses MySQL exclusively. It must not silently fall back to SQLite.
+
 ## Tests
 
 ```powershell
