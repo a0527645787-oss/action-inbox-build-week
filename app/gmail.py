@@ -2,6 +2,7 @@ import base64
 import hashlib
 import html
 import json
+import logging
 import os
 import re
 import secrets
@@ -26,6 +27,7 @@ GMAIL_TASK_LIMIT = 20
 GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+logger = logging.getLogger(__name__)
 
 
 class GmailConfigurationError(RuntimeError):
@@ -42,6 +44,7 @@ class GmailSyncResult:
     candidates: int
     new_messages: int
     tasks_created: int
+    analysis_failures: int = 0
 
 
 def _required(name: str) -> str:
@@ -195,32 +198,52 @@ def sync_gmail(db: Session, user: User, credential: GmailCredential, client: htt
         response = owned.get(f"{GMAIL_API}/messages", headers=headers, params={"labelIds": "INBOX", "q": GMAIL_QUERY, "maxResults": GMAIL_MESSAGE_LIMIT})
         response.raise_for_status()
         candidates = response.json().get("messages", [])[:GMAIL_MESSAGE_LIMIT]
-        known = set(db.scalars(select(Email.gmail_message_id).where(Email.user_id == user.id, Email.gmail_message_id.is_not(None))).all())
-        imported = tasks_created = 0
+        existing_by_id = {
+            email.gmail_message_id: email
+            for email in db.scalars(
+                select(Email).where(Email.user_id == user.id, Email.gmail_message_id.is_not(None))
+            ).all()
+        }
+        imported = tasks_created = analysis_failures = 0
         for item in candidates:
             message_id = item.get("id")
-            if not message_id or message_id in known or tasks_created >= GMAIL_TASK_LIMIT:
+            if not message_id or tasks_created >= GMAIL_TASK_LIMIT:
                 continue
-            detail = owned.get(f"{GMAIL_API}/messages/{message_id}", headers=headers, params={"format": "full"})
-            detail.raise_for_status(); message = detail.json()
-            labels = set(message.get("labelIds", []))
-            if "INBOX" not in labels or labels.intersection({"SPAM", "TRASH"}):
+            email = existing_by_id.get(message_id)
+            if email is not None and email.analyzed and email.analysis is not None:
                 continue
-            body = _body(message.get("payload", {})).strip()[:20000]
-            if not body:
+            if email is None:
+                detail = owned.get(f"{GMAIL_API}/messages/{message_id}", headers=headers, params={"format": "full"})
+                detail.raise_for_status(); message = detail.json()
+                labels = set(message.get("labelIds", []))
+                if "INBOX" not in labels or labels.intersection({"SPAM", "TRASH"}):
+                    continue
+                body = _body(message.get("payload", {})).strip()[:20000]
+                if not body:
+                    continue
+                email = Email(user_id=user.id, external_id=f"gmail:{message_id}", gmail_message_id=message_id,
+                              gmail_thread_id=message.get("threadId"), sender=_header(message, "From")[:255] or "Unknown sender",
+                              subject=_header(message, "Subject")[:255] or "(no subject)", received_at=_received_at(message),
+                              body=body, source="gmail", analyzed=False)
+                db.add(email); db.commit(); db.refresh(email)
+                existing_by_id[message_id] = email
+                imported += 1
+            try:
+                analysis = analyze_email(db, email)
+            except Exception as exc:
+                db.rollback()
+                analysis_failures += 1
+                message_fingerprint = hashlib.sha256(message_id.encode()).hexdigest()[:12]
+                logger.warning(
+                    "Gmail analysis failed exception_class=%s message_fingerprint=%s",
+                    type(exc).__name__,
+                    message_fingerprint,
+                )
                 continue
-            email = Email(user_id=user.id, external_id=f"gmail:{message_id}", gmail_message_id=message_id,
-                          gmail_thread_id=message.get("threadId"), sender=_header(message, "From")[:255] or "Unknown sender",
-                          subject=_header(message, "Subject")[:255] or "(no subject)", received_at=_received_at(message),
-                          body=body, source="gmail", analyzed=False)
-            db.add(email); db.commit(); db.refresh(email)
-            analysis = analyze_email(db, email)
-            imported += 1
             if analysis.action_required and email.task:
                 tasks_created += 1
-            known.add(message_id)
         credential.last_synced_at = utcnow(); db.commit()
-        return GmailSyncResult(GMAIL_QUERY, len(candidates), imported, tasks_created)
+        return GmailSyncResult(GMAIL_QUERY, len(candidates), imported, tasks_created, analysis_failures)
     except httpx.HTTPError as exc:
         raise GmailSyncError("Gmail read-only sync failed") from exc
     finally:

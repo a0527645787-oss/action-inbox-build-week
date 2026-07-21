@@ -215,6 +215,8 @@ def analyze_email(db: Session, email: Email, *, force: bool = False, client=None
     source = "demo_fallback"
     error = None
     resources=select_relevant_resources(db,email)
+    if email.source != "demo" and client is None and not os.getenv("OPENAI_API_KEY"):
+        raise LiveAnalysisError("Live analysis is unavailable for this email")
     try:
         if client is not None or os.getenv("OPENAI_API_KEY"):
             result = request_live_analysis(email, client=client, resources=resources)
@@ -222,6 +224,10 @@ def analyze_email(db: Session, email: Email, *, force: bool = False, client=None
         else:
             result = fallback_analysis(email,resources)
     except Exception as exc:
+        if email.source != "demo":
+            if isinstance(exc, LiveAnalysisError):
+                raise
+            raise LiveAnalysisError("OpenAI analysis failed") from exc
         result = fallback_analysis(email,resources)
         error = str(exc) if isinstance(exc, LiveAnalysisError) else "Live analysis returned invalid output"
     return _project_result(db, email, result, source, error)

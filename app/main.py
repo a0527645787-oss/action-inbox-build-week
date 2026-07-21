@@ -61,12 +61,13 @@ def inbox(request: Request, db: Session = Depends(get_db), current_user: User = 
 
 
 @app.get("/gmail")
-def gmail_page(request: Request, candidates: int = 0, imported: int = 0, tasks_created: int = 0,
+def gmail_page(request: Request, candidates: int = 0, imported: int = 0, tasks_created: int = 0, failures: int = 0,
                db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     credential = db.scalar(select(GmailCredential).where(GmailCredential.user_id == current_user.id).order_by(GmailCredential.updated_at.desc()))
     return templates.TemplateResponse(request, "gmail.html", {"credential": credential, "configured": gmail_configured(),
         "scope": GMAIL_SCOPE, "query": GMAIL_QUERY, "message_limit": GMAIL_MESSAGE_LIMIT, "task_limit": GMAIL_TASK_LIMIT,
-        "candidates": max(candidates, 0), "imported": max(imported, 0), "tasks_created": max(tasks_created, 0)})
+        "candidates": max(candidates, 0), "imported": max(imported, 0), "tasks_created": max(tasks_created, 0),
+        "failures": max(failures, 0)})
 
 
 @app.get("/auth/google/start")
@@ -94,7 +95,7 @@ def gmail_sync(db: Session = Depends(get_db), current_user: User = Depends(get_c
         result = sync_gmail(db, current_user, credential)
     except GmailSyncError as exc:
         raise HTTPException(502, str(exc)) from exc
-    return RedirectResponse(f"/gmail?candidates={result.candidates}&imported={result.new_messages}&tasks_created={result.tasks_created}", 303)
+    return RedirectResponse(f"/gmail?candidates={result.candidates}&imported={result.new_messages}&tasks_created={result.tasks_created}&failures={result.analysis_failures}", 303)
 
 
 @app.post("/mcp")

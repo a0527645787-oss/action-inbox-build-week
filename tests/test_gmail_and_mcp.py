@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
+from app.analysis import analyze_email, fallback_analysis
 from app.auth import ensure_demo_user, get_current_user
 from app.database import get_db
 from app.gmail import GMAIL_QUERY, GMAIL_SCOPE, encrypt_tokens, sync_gmail
@@ -46,7 +47,11 @@ def _token(monkeypatch):
 
 
 def test_gmail_sync_is_bounded_read_only_and_idempotent(db, monkeypatch):
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "app.analysis.request_live_analysis",
+        lambda email, client=None, resources=None: fallback_analysis(email, resources),
+    )
     user = ensure_demo_user(db)
     credential = GmailCredential(user_id=user.id, account_email="pilot@example.test", encrypted_token=_token(monkeypatch), scopes=GMAIL_SCOPE)
     db.add(credential); db.commit()
@@ -72,6 +77,49 @@ def test_gmail_sync_is_bounded_read_only_and_idempotent(db, monkeypatch):
         raise AssertionError("duplicate Gmail message ID must be rejected")
     except IntegrityError:
         db.rollback()
+
+
+def test_gmail_timeout_is_retained_and_successful_retry_does_not_duplicate(db, monkeypatch):
+    from app.openai_analysis import LiveAnalysisError
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    user = ensure_demo_user(db)
+    credential = GmailCredential(user_id=user.id, account_email="pilot@example.test",
+                                 encrypted_token=_token(monkeypatch), scopes=GMAIL_SCOPE)
+    db.add(credential); db.commit()
+    client = GmailClient()
+
+    def timeout(*args, **kwargs):
+        raise LiveAnalysisError("OpenAI analysis failed")
+
+    monkeypatch.setattr("app.analysis.request_live_analysis", timeout)
+    first = sync_gmail(db, user, credential, client=client)
+    assert (first.new_messages, first.tasks_created, first.analysis_failures) == (1, 0, 1)
+    email = db.scalar(select(Email).where(Email.gmail_message_id == "gmail-1"))
+    assert email is not None and email.analyzed is False and email.analysis is None and email.task is None
+
+    monkeypatch.setattr(
+        "app.analysis.request_live_analysis",
+        lambda target, client=None, resources=None: fallback_analysis(target, resources),
+    )
+    second = sync_gmail(db, user, credential, client=client)
+    assert (second.new_messages, second.tasks_created, second.analysis_failures) == (0, 1, 0)
+    third = sync_gmail(db, user, credential, client=client)
+    assert (third.new_messages, third.tasks_created, third.analysis_failures) == (0, 0, 0)
+    assert db.scalar(select(func.count()).select_from(Email).where(Email.gmail_message_id == "gmail-1")) == 1
+    assert db.scalar(select(func.count()).select_from(Task).where(Task.email_id == email.id)) == 1
+
+
+def test_supported_synthetic_email_still_uses_deterministic_fallback(db, monkeypatch):
+    from app.demo_data import ingest_demo_emails
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    user = ensure_demo_user(db)
+    ingest_demo_emails(db, user)
+    email = db.scalar(select(Email).where(Email.user_id == user.id, Email.external_id == "demo-documents"))
+    analysis = analyze_email(db, email)
+    assert analysis.source == "demo_fallback"
+    assert email.task is not None
 
 
 def test_mcp_requires_auth_and_all_tools_are_read_only(db, monkeypatch):
