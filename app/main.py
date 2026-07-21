@@ -1,9 +1,8 @@
 from contextlib import asynccontextmanager
-import json
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
@@ -12,9 +11,11 @@ from sqlalchemy.orm import Session, joinedload
 from .analysis import analyze_email, highlighted_parts
 from .auth import get_current_user
 from .database import get_db
-from .demo_data import load_demo_emails
+from .demo_data import ingest_demo_emails
+from .execution import PACKAGE_EXECUTORS, build_execution_package, package_as_text, parse_structured_result
 from .models import BusinessResource, Email, Task, User
 from .resources import MAX_RESOURCE_CHARS, RESOURCE_TYPES, seed_demo_resources
+from .triage import triage_unanalyzed_emails
 
 
 ROOT = Path(__file__).parent
@@ -41,11 +42,12 @@ def landing(request: Request, current_user: User = Depends(get_current_user)):
     return templates.TemplateResponse(request, "landing.html", {"current_user": current_user})
 
 
-@app.get("/demo")
+@app.post("/demo")
 def demo(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    load_demo_emails(db, current_user)
     seed_demo_resources(db, current_user)
-    return RedirectResponse("/inbox", 303)
+    ingest_demo_emails(db, current_user)
+    result = triage_unanalyzed_emails(db, current_user.id)
+    return RedirectResponse(f"/dashboard?emails_checked={result.emails_checked}&tasks_created={result.tasks_created}", 303)
 
 
 @app.get("/inbox")
@@ -54,6 +56,12 @@ def inbox(request: Request, db: Session = Depends(get_db), current_user: User = 
         select(Email).where(Email.user_id == current_user.id).order_by(Email.received_at.desc())
     ).all()
     return templates.TemplateResponse(request, "inbox.html", {"emails": emails})
+
+
+@app.post("/api/inbox/analyze-all")
+def analyze_inbox(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    result = triage_unanalyzed_emails(db, current_user.id)
+    return RedirectResponse(f"/dashboard?emails_checked={result.emails_checked}&tasks_created={result.tasks_created}", 303)
 
 
 @app.get("/emails/{email_id}")
@@ -91,28 +99,34 @@ def reanalyze(email_id: int, db: Session = Depends(get_db), current_user: User =
 
 
 @app.get("/dashboard")
-def dashboard(request: Request, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def dashboard(request: Request, emails_checked: int = 0, tasks_created: int = 0, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     tasks = db.scalars(
         select(Task)
         .options(joinedload(Task.email).joinedload(Email.analysis))
         .where(Task.user_id == current_user.id)
         .order_by(Task.deadline)
     ).all()
-    return templates.TemplateResponse(request, "dashboard.html", {"tasks": tasks})
+    return templates.TemplateResponse(request, "dashboard.html", {"tasks": tasks, "emails_checked": max(emails_checked, 0), "tasks_created": max(tasks_created, 0)})
+
+
+def _owned_task(db: Session, task_id: int, user_id: str) -> Task:
+    task = db.scalar(
+        select(Task)
+        .options(joinedload(Task.email).joinedload(Email.analysis))
+        .where(Task.id == task_id, Task.user_id == user_id)
+    )
+    if not task:
+        raise HTTPException(404, "Task not found")
+    return task
 
 
 @app.get("/tasks/{task_id}")
 def task_detail(task_id: int, request: Request, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    task = db.scalar(
-        select(Task)
-        .options(joinedload(Task.email).joinedload(Email.analysis))
-        .where(Task.id == task_id, Task.user_id == current_user.id)
-    )
-    if not task:
-        raise HTTPException(404, "Task not found")
+    task = _owned_task(db, task_id, current_user.id)
     before, evidence, after = highlighted_parts(task.email)
     guidance_views = []
-    structured = json.loads(task.email.analysis.structured_result or "{}")
+    result = parse_structured_result(task.email.analysis.structured_result)
+    structured = result.model_dump()
     for guidance in structured.get("resource_guidance", []):
         try:
             resource_id = int(guidance["resource_id"].removeprefix("resource-"))
@@ -133,7 +147,32 @@ def task_detail(task_id: int, request: Request, db: Session = Depends(get_db), c
         if not isinstance(start, int) or not isinstance(end, int) or resource.content[start:end] != quote:
             continue
         guidance_views.append({"guidance": guidance, "resource": resource, "before": resource.content[:start], "quote": quote, "after": resource.content[end:]})
-    return templates.TemplateResponse(request, "task.html", {"task": task, "before": before, "evidence": evidence, "after": after, "guidance_views": guidance_views})
+    return templates.TemplateResponse(request, "task.html", {"task": task, "before": before, "evidence": evidence, "after": after, "guidance_views": guidance_views, "result": result, "execution": result.execution_guidance})
+
+
+@app.get("/tasks/{task_id}/execution-package", response_class=HTMLResponse)
+def execution_package_preview(task_id: int, request: Request, executor: str = "CHATGPT_WORK", db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if executor not in PACKAGE_EXECUTORS:
+        raise HTTPException(422, "Unsupported package executor")
+    task = _owned_task(db, task_id, current_user.id)
+    try:
+        result = parse_structured_result(task.email.analysis.structured_result)
+        package = build_execution_package(task, result, executor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return templates.TemplateResponse(request, "execution_package.html", {"task": task, "result": result, "execution": result.execution_guidance, "package": package, "package_text": package_as_text(package), "executor": executor})
+
+
+@app.get("/tasks/{task_id}/execution-package/download")
+def execution_package_download(task_id: int, executor: str = "CHATGPT_WORK", db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if executor not in PACKAGE_EXECUTORS:
+        raise HTTPException(422, "Unsupported package executor")
+    task = _owned_task(db, task_id, current_user.id)
+    try:
+        package = build_execution_package(task, parse_structured_result(task.email.analysis.structured_result), executor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return Response(package_as_text(package), media_type="application/json", headers={"Content-Disposition": f'attachment; filename="actioninbox-task-{task.id}.json"'})
 
 
 @app.get("/resources")

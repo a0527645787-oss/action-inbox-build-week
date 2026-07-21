@@ -11,15 +11,26 @@ DEMO_EMAILS = [
  {"external_id":"demo-newsletter","sender":"updates@productweekly.example","subject":"This week's product and design stories","received_at":datetime(2026,7,19,13),"body":"This week: five interface trends, an interview with a design leader, and our recommended reading list. Visit https://productweekly.example/july to read the issue. You are receiving this monthly newsletter because you subscribed."},
 ]
 
-def load_demo_emails(db: Session, user: User | None = None):
+def ingest_demo_emails(db: Session, user: User | None = None):
     from .auth import DEMO_USER_ID, ensure_demo_user
     if user is None:
         user = ensure_demo_user(db)
     if user.id != DEMO_USER_ID:
         raise ValueError("Demo emails may only be seeded for the dedicated demo user")
     existing = set(db.scalars(select(Email.external_id).where(Email.user_id == user.id)).all())
+    created = []
     for item in DEMO_EMAILS:
         if item["external_id"] not in existing:
-            db.add(Email(**item, source="demo", user_id=user.id))
+            email = Email(**item, source="demo", user_id=user.id)
+            db.add(email)
+            created.append(email)
     db.commit()
+    return created
+
+
+def load_demo_emails(db: Session, user: User | None = None):
+    from .auth import ensure_demo_user
+    if user is None:
+        user = ensure_demo_user(db)
+    ingest_demo_emails(db, user)
     return list(db.scalars(select(Email).where(Email.user_id == user.id).order_by(Email.received_at.desc())).all())

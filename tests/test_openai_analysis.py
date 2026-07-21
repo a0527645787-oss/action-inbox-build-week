@@ -27,6 +27,18 @@ class FakeClient:
         self.responses = FakeResponses(output, error)
 
 
+def execution_guidance(fact_id="deadline"):
+    return {
+        "outcome":{"text":"The supported task is prepared.","source":"EMAIL_FACT","supporting_fact_ids":[fact_id],"supporting_guidance_ids":[]},
+        "ordered_steps":[{"text":"Review the supported fact, then prepare the task for approval.","source":"AI_RECOMMENDATION","supporting_fact_ids":[fact_id],"supporting_guidance_ids":[]}],
+        "required_inputs":[{"text":"User approval.","source":"MISSING_UNCERTAIN","supporting_fact_ids":[],"supporting_guidance_ids":[]}],
+        "missing_information":["User approval is not yet recorded."],
+        "safety_checks":[{"text":"Do not perform an external action without approval.","source":"AI_RECOMMENDATION","supporting_fact_ids":[],"supporting_guidance_ids":[]}],
+        "proposed_deliverable":{"text":"A review brief.","source":"AI_RECOMMENDATION","supporting_fact_ids":[],"supporting_guidance_ids":[]},
+        "recommended_executor":"ACTIONINBOX","executor_explanation":"ActionInbox can prepare the brief only.","readiness":"NEEDS_APPROVAL",
+    }
+
+
 def result_for(body, *, url=None):
     quote = "Approve USD 50 by July 21, 2026."
     start = body.index(quote)
@@ -40,7 +52,7 @@ def result_for(body, *, url=None):
         "tasks":[{"id":"task","title":"Approve payment","due_at":"2026-07-21T00:00:00","due_text":"July 21, 2026","uncertainty":None,"evidence_ids":["ev-deadline"]}],
         "email_facts":facts,"resource_guidance":[],
         "ai_suggestions":[{"type":"next_step","text":"Review the payment.","supporting_fact_ids":["deadline"],"supporting_guidance_ids":[],"uncertainty":None}],
-        "missing_information":[],
+        "missing_information":[],"execution_guidance":execution_guidance(),
     })
 
 
@@ -53,7 +65,7 @@ def test_valid_structured_analysis_is_persisted_as_live(db):
         "primary_classification":"invoice","action_required":True,"summary":"Invoice approval required.",
         "tasks":[{"id":"task","title":"Approve INV-2048","due_at":"2026-07-21T00:00:00","due_text":"July 21, 2026","uncertainty":None,"evidence_ids":["ev"]}],
         "email_facts":[{"id":"deadline","type":"deadline","value":"July 21, 2026","normalized_value":"2026-07-21","confidence":"high","uncertainty":None,"evidence":{"id":"ev","exact_quote":quote,"start_offset":start,"end_offset":start+len(quote)}}],
-        "resource_guidance":[],"ai_suggestions":[],"missing_information":[],
+        "resource_guidance":[],"ai_suggestions":[],"missing_information":[],"execution_guidance":execution_guidance(),
     })
     client = FakeClient(output)
     analysis = analyze_email(db, email, client=client)
@@ -165,7 +177,7 @@ def test_vendor_renewal_live_analysis_creates_one_dashboard_task_on_reanalysis(d
             {"id":"fact-insurance","type":"required_document","value":"proof of insurance","normalized_value":None,"confidence":"high","uncertainty":None,"evidence":{"id":"ev-insurance","exact_quote":insurance_quote,"start_offset":insurance_start,"end_offset":insurance_start+len(insurance_quote)}},
             {"id":"fact-deadline","type":"deadline","value":"July 24, 2026","normalized_value":"2026-07-24","confidence":"high","uncertainty":None,"evidence":{"id":"ev-deadline","exact_quote":deadline_quote,"start_offset":deadline_start,"end_offset":deadline_start+len(deadline_quote)}}
         ],
-        "resource_guidance":[],"ai_suggestions":[],"missing_information":[],
+        "resource_guidance":[],"ai_suggestions":[],"missing_information":[],"execution_guidance":execution_guidance("fact-w9"),
     })
 
     analysis = analyze_email(db, email, client=FakeClient(output))

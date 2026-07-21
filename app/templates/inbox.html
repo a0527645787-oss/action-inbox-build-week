@@ -1,1 +1,22 @@
-{% extends "base.html" %}{% block title %}Demo inbox · ActionInbox{% endblock %}{% block content %}<div class="heading"><div><span class="eyebrow">Public demo</span><h1>Inbox</h1><p>Five synthetic emails. No live mailbox required.</p></div><a class="button secondary" href="/dashboard">View tasks</a></div><section class="list">{% for email in emails %}<a class="email-row" href="/emails/{{ email.id }}"><div class="avatar">{{ email.sender[0]|upper }}</div><div class="grow"><strong>{{ email.subject }}</strong><span>{{ email.sender }}</span><p>{{ email.body[:115] }}…</p></div><div class="meta"><time>{{ email.received_at.strftime('%b %d') }}</time><span class="badge {% if email.analyzed %}done{% endif %}">{{ 'Analyzed' if email.analyzed else 'New' }}</span></div></a>{% endfor %}</section>{% endblock %}
+{% extends "base.html" %}
+{% block title %}Demo inbox · ActionInbox{% endblock %}
+{% block content %}
+<div class="heading">
+  <div><span class="eyebrow">Public demo</span><h1>Inbox</h1><p>Newly ingested email is analyzed automatically. No live mailbox is connected.</p></div>
+  <a class="button secondary" href="/dashboard">View tasks</a>
+</div>
+<section class="card inbox-check">
+  <h2>Automatic triage is on for ingestion</h2>
+  <p>The five demo emails were checked when the demo started. Use this secondary retry for any newly ingested email.</p>
+  <form method="post" action="/api/inbox/analyze-all"><button class="button" type="submit">Check for new emails</button></form>
+</section>
+<section class="list">
+  {% for email in emails %}
+  <a class="email-row" href="/emails/{{ email.id }}">
+    <div class="avatar">{{ email.sender[0]|upper }}</div>
+    <div class="grow"><strong>{{ email.subject }}</strong><span>{{ email.sender }}</span><p>{{ email.body[:115] }}…</p></div>
+    <div class="meta"><time>{{ email.received_at.strftime('%b %d') }}</time><span class="badge {% if email.analyzed %}done{% endif %}">{{ 'Analyzed' if email.analyzed else 'New' }}</span></div>
+  </a>
+  {% endfor %}
+</section>
+{% endblock %}

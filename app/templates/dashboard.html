@@ -1,1 +1,25 @@
-{% extends "base.html" %}{% block title %}Dashboard · ActionInbox{% endblock %}{% block content %}<div class="heading"><div><span class="eyebrow">Action dashboard</span><h1>Your next actions</h1><p>Tasks appear after actionable demo emails are analyzed.</p></div><a class="button secondary" href="/inbox">Analyze more email</a></div>{% if tasks %}<section class="task-grid">{% for task in tasks %}<a class="card task-card" href="/tasks/{{ task.id }}"><span class="badge">{{ task.email.analysis.classification|replace('_',' ') }}</span><h2>{{ task.title }}</h2><p>{{ task.email.analysis.summary }}</p><div class="deadline"><span>Deadline</span><strong>{{ task.deadline_text or 'No deadline' }}</strong></div></a>{% endfor %}</section>{% else %}<section class="empty"><h2>No tasks yet</h2><p>Open a demo email and select Analyze.</p><a class="button" href="/inbox">Go to demo inbox</a></section>{% endif %}{% endblock %}
+{% extends "base.html" %}
+{% block title %}Dashboard · ActionInbox{% endblock %}
+{% block content %}
+<div class="heading">
+  <div>
+    <span class="eyebrow">Action dashboard</span><h1>Your next actions</h1>
+    <p>ActionInbox found the task, proved where it came from, explained how to complete it, and prepared it for safe execution.</p>
+    {% if emails_checked or tasks_created %}<p class="result-banner"><strong>{{ emails_checked }} emails checked · {{ tasks_created }} actionable tasks created.</strong></p>{% endif %}
+  </div>
+  <a class="button secondary" href="/inbox">View inbox</a>
+</div>
+{% if tasks %}
+<section class="task-grid">
+  {% for task in tasks %}
+  <a class="card task-card" href="/tasks/{{ task.id }}">
+    <span class="badge">{{ task.email.analysis.classification|replace('_',' ') }}</span>
+    <h2>{{ task.title }}</h2><p>{{ task.email.analysis.summary }}</p>
+    <div class="deadline"><span>Deadline</span><strong>{{ task.deadline_text or 'No deadline' }}</strong></div>
+  </a>
+  {% endfor %}
+</section>
+{% else %}
+<section class="empty"><h2>No tasks yet</h2><p>Start the demo to ingest and automatically analyze the synthetic inbox.</p><form method="post" action="/demo"><button class="button" type="submit">Start demo</button></form></section>
+{% endif %}
+{% endblock %}

@@ -1,1 +1,10 @@
-{% extends "base.html" %}{% block title %}ActionInbox · Evidence-backed action{% endblock %}{% block content %}<section class="hero"><span class="eyebrow">OpenAI Build Week 2026</span><h1>Turn email into clear, evidence-backed work.</h1><p>ActionInbox finds what needs action, preserves the exact source, and keeps AI guidance clearly separate.</p><a class="button" href="/demo">Try the public demo</a></section>{% endblock %}
+{% extends "base.html" %}
+{% block title %}ActionInbox · Evidence-backed action{% endblock %}
+{% block content %}
+<section class="hero">
+  <span class="eyebrow">OpenAI Build Week 2026</span>
+  <h1>Turn email into clear, evidence-backed work.</h1>
+  <p>ActionInbox finds the task, proves where it came from, explains how to complete it, and prepares it for safe execution.</p>
+  <form method="post" action="/demo"><button class="button" type="submit">Start the public demo</button></form>
+</section>
+{% endblock %}

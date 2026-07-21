@@ -1,70 +1,91 @@
 # ActionInbox
 
-ActionInbox turns incoming emails into clear, evidence-backed tasks. It supports live GPT-5.6 analysis with strict structured output and exact source validation, while retaining the deterministic five-email demo fallback. Enabled pasted-text business resources add personalized guidance without being mixed into email facts.
+ActionInbox turns incoming email into evidence-backed tasks, explains how to complete them, and prepares a safe execution handoff for user review.
 
-No Gmail account is required. Gmail, email sending, file uploads, calendar actions, and link fetching are not implemented.
+## Implemented
 
-## Run locally
+- Explicit five-email demo ingestion with automatic inbox triage.
+- Tasks only for actionable email, with exact email evidence and highlighted source text.
+- Live GPT-5.6 structured analysis when `OPENAI_API_KEY` is configured server-side.
+- Deterministic fallback with complete guidance when no API key is available or live analysis fails.
+- Separate email facts, evidence-backed business-resource guidance, and visibly labeled AI recommendations.
+- Per-task outcome, ordered steps, required inputs, missing information, safety checks, proposed deliverable, executor recommendation, and readiness.
+- Preview, clipboard copy, and JSON download of a tenant-scoped execution package for ChatGPT Work or Codex.
+- Multi-user ownership, SQLite/MySQL SQLAlchemy configuration, and Alembic migrations.
 
-Requires Python 3.11+.
+The execution package is preparation only. ActionInbox does not claim that Work, Codex, Gmail, Calendar, or another service executed anything.
 
-```bash
+## Not implemented
+
+- Real Gmail synchronization or continuous background scanning.
+- Direct ChatGPT Work or Codex invocation.
+- External connectors, email sending, or calendar-event creation.
+- AWS/RDS deployment or autonomous external execution.
+- Link fetching, file uploads, or public registration.
+
+## Local setup
+
+Python 3.12 is recommended.
+
+```powershell
 python -m venv .venv
-# Windows: .venv\Scripts\activate
-# macOS/Linux: source .venv/bin/activate
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-copy .env.example .env  # optional on Windows; add OPENAI_API_KEY for live analysis
+Copy-Item .env.example .env
 alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
-Open [http://localhost:8000](http://localhost:8000). Health: [http://localhost:8000/health](http://localhost:8000/health).
-
-## Run tests
-
-```bash
-pytest -q
-```
-
-## Run with Docker Compose
-
-```bash
-docker compose up --build
-```
-
-Stop with `docker compose down`. The demo database persists in a named volume.
+Open [http://localhost:8000](http://localhost:8000). The local demo requires `LOCAL_DEMO_AUTH_ENABLED=true`. Production fails closed without a real authentication dependency.
 
 ## Demo flow
 
-1. Select **Try the public demo**.
-2. Open a synthetic email and select **Analyze email**.
-3. Actionable emails become dashboard tasks; informational and newsletter emails do not.
-4. Open a task to compare extracted details, exact evidence, highlighted original text, and the clearly separated AI suggestion.
-5. Open **Business resources** to create, view, edit, enable/disable, or delete pasted procedures, policies, role directories, templates, and instructions.
+1. Select **Start the public demo**. This explicit POST ingests five synthetic emails and immediately analyzes all new email for the demo user.
+2. The prepared Dashboard reports `5 emails checked · 3 actionable tasks created.`
+3. Open any task to see verified facts and evidence, execution guidance, business guidance, AI recommendations, and execution options.
+4. Select **Prepare for Work** or **Prepare for Codex** to preview a safe action package before copying or downloading it.
+5. **Check for new emails** in the Inbox remains a manual retry for newly ingested email.
 
-The public demo seeds an expense reimbursement procedure, employee responsibility directory, and invoice approval policy. Re-analysis selects the latest relevant enabled resources. Resource guidance is displayed separately with its resource title, exact highlighted quote, and deterministic character offsets. If nothing relevant is enabled, the task page says so explicitly.
-
-The fallback analysis is deterministic sample data. With `OPENAI_API_KEY` configured in the server environment, Analyze and Re-analyze use the Responses API with `gpt-5.6`. Without a key—or if the API or structured output fails—the safe deterministic demo analysis is used. The browser never receives the API key.
+Reopening the demo and repeated triage are idempotent and do not duplicate analyses, tasks, or guidance.
 
 ## Environment
 
-- `OPENAI_API_KEY` — optional; enables live GPT-5.6 analysis. Read only by the backend.
-- `DATABASE_URL` — optional; defaults to `sqlite:///./actioninbox.db`.
-- `LOCAL_DEMO_AUTH_ENABLED` — set explicitly to `true` for local/demo use. If it is absent or false, application routes fail closed until a real authentication dependency is configured. Public registration is not implemented.
+Configuration is read only from server-side environment variables:
 
-Supported database URL shapes:
+```text
+DATABASE_URL=sqlite:///./actioninbox.db
+LOCAL_DEMO_AUTH_ENABLED=true
+OPENAI_API_KEY=
+OPENAI_CA_BUNDLE=
+```
+
+Supported database examples (templates only; do not commit credentials):
 
 ```text
 sqlite:///./actioninbox.db
-mysql+pymysql://app-user:replace-me@db-host:3306/actioninbox?charset=utf8mb4
+mysql+pymysql://actioninbox:change-me@localhost:3306/actioninbox?charset=utf8mb4
 ```
 
-Use environment-managed credentials in hosted environments; never commit them. Apply schema changes before starting a release:
+`OPENAI_CA_BUNDLE` is optional and must point to a readable server-side CA bundle. Never place API keys, certificates, local databases, or real credentials in Git.
 
-```bash
-alembic upgrade head
+## Docker
+
+```powershell
+docker compose up --build
 ```
 
-The Docker image performs this migration before starting Uvicorn. The optional Compose MySQL validation stack is available with `docker compose --profile mysql up --build mysql actioninbox-mysql`; it serves the MySQL-backed app on port 8001.
+The default service uses SQLite in a named volume and listens on [http://localhost:8000](http://localhost:8000). The MySQL profile is intended for isolated integration validation:
 
-Live analysis uses a 60-second request timeout, disables response storage, does not enable tools, and rejects email bodies longer than 12,000 characters. Pasted resources are limited to 12,000 characters each and selected resource context is capped at 18,000 characters. Email and resource text are treated as untrusted data. Links are inert text and are never opened or fetched.
+```powershell
+docker compose --profile mysql up --build
+```
+
+Never run migration validation against an existing database or volume; create a fresh isolated Compose project instead.
+
+## Tests
+
+```powershell
+pytest
+```
+
+The MySQL integration test is opt-in through its documented test environment variables. All OpenAI API calls are mocked in automated tests.

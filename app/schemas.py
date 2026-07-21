@@ -57,6 +57,25 @@ class AISuggestionResult(StrictModel):
     uncertainty: str | None
 
 
+class ExecutionItemResult(StrictModel):
+    text: str
+    source: Literal["EMAIL_FACT", "BUSINESS_GUIDANCE", "AI_RECOMMENDATION", "MISSING_UNCERTAIN"]
+    supporting_fact_ids: list[str]
+    supporting_guidance_ids: list[str]
+
+
+class ExecutionGuidanceResult(StrictModel):
+    outcome: ExecutionItemResult
+    ordered_steps: list[ExecutionItemResult]
+    required_inputs: list[ExecutionItemResult]
+    missing_information: list[str]
+    safety_checks: list[ExecutionItemResult]
+    proposed_deliverable: ExecutionItemResult
+    recommended_executor: Literal["USER", "ACTIONINBOX", "CHATGPT_WORK", "CODEX", "FUTURE_CONNECTOR", "UNSUPPORTED"]
+    executor_explanation: str
+    readiness: Literal["READY_TO_PREPARE", "NEEDS_INFORMATION", "NEEDS_APPROVAL", "INTEGRATION_REQUIRED", "UNSUPPORTED"]
+
+
 class EmailAnalysisResult(StrictModel):
     primary_classification: Literal["action_required", "informational", "newsletter_noise", "invoice", "meeting"]
     action_required: bool
@@ -66,3 +85,4 @@ class EmailAnalysisResult(StrictModel):
     resource_guidance: list[ResourceGuidanceResult]
     ai_suggestions: list[AISuggestionResult]
     missing_information: list[str]
+    execution_guidance: ExecutionGuidanceResult | None
