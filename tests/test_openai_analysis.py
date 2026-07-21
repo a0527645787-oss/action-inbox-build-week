@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from app.analysis import analyze_email
 from app.demo_data import load_demo_emails
 from app.models import Email, Task
-from app.openai_analysis import MAX_EMAIL_CHARS, LiveAnalysisError, SYSTEM_PROMPT, build_input, log_openai_exception, request_live_analysis, validate_evidence
+from app.openai_analysis import MAX_EMAIL_CHARS, LiveAnalysisError, SYSTEM_PROMPT, _build_ssl_context, build_input, log_openai_exception, request_live_analysis, validate_evidence
 from app.schemas import EmailAnalysisResult
 
 
@@ -157,6 +157,22 @@ def test_missing_ca_bundle_falls_back_safely(db, monkeypatch):
     analysis = analyze_email(db, email)
     assert analysis.source == "demo_fallback"
     assert analysis.error_message == "OPENAI_CA_BUNDLE does not point to a readable file"
+
+
+def test_custom_ca_extends_default_ssl_context(tmp_path, monkeypatch):
+    bundle = tmp_path / "custom-ca.pem"
+    bundle.write_text("test-only certificate placeholder", encoding="utf-8")
+    loaded = []
+
+    class FakeContext:
+        def load_verify_locations(self, *, cafile):
+            loaded.append(cafile)
+
+    context = FakeContext()
+    monkeypatch.setattr("app.openai_analysis.ssl.create_default_context", lambda: context)
+
+    assert _build_ssl_context(str(bundle)) is context
+    assert loaded == [str(bundle)]
 
 
 def test_vendor_renewal_live_analysis_creates_one_dashboard_task_on_reanalysis(db):

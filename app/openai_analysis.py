@@ -1,6 +1,7 @@
 import os
 import logging
 import re
+import ssl
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import urlparse
@@ -39,6 +40,15 @@ Return only the strict structured result. All schema fields are required; use nu
 
 class LiveAnalysisError(RuntimeError):
     pass
+
+
+def _build_ssl_context(ca_bundle: str | None) -> ssl.SSLContext:
+    if ca_bundle and not Path(ca_bundle).is_file():
+        raise LiveAnalysisError("OPENAI_CA_BUNDLE does not point to a readable file")
+    context = ssl.create_default_context()
+    if ca_bundle:
+        context.load_verify_locations(cafile=ca_bundle)
+    return context
 
 
 def _safe_error_message(exc: Exception) -> str:
@@ -231,11 +241,8 @@ def request_live_analysis(email, client=None, resources=None) -> EmailAnalysisRe
         if not api_key:
             raise LiveAnalysisError("OPENAI_API_KEY is not configured")
         ca_bundle = os.getenv("OPENAI_CA_BUNDLE")
-        http_client = None
-        if ca_bundle:
-            if not Path(ca_bundle).is_file():
-                raise LiveAnalysisError("OPENAI_CA_BUNDLE does not point to a readable file")
-            http_client = httpx.Client(verify=ca_bundle, timeout=REQUEST_TIMEOUT_SECONDS)
+        context = _build_ssl_context(ca_bundle)
+        http_client = httpx.Client(verify=context, timeout=REQUEST_TIMEOUT_SECONDS)
         client = OpenAI(api_key=api_key, timeout=REQUEST_TIMEOUT_SECONDS, max_retries=0, http_client=http_client)
         owns_client = True
     try:
