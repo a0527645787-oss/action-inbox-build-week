@@ -32,7 +32,7 @@ jobs:
           INSTANCE_ID: i-00d5b992e63484d51
           DEPLOY_SHA: ${{ github.sha }}
         run: |
-          set -Eeuo pipefail
+          "set -eu",
 
           parameters_file="$(mktemp)"
           trap 'rm -f "$parameters_file"' EXIT
