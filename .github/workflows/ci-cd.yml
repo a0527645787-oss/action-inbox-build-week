@@ -49,6 +49,7 @@ jobs:
             local url="$1"
             local host="${url#https://}"
             local work_dir curl_status http_status body verify_result cert_count
+            local curl_error certificate_details chain_status annotation annotation_level
             host="${host%%/*}"
             work_dir="$(mktemp -d)"
 
@@ -107,10 +108,11 @@ jobs:
                 "$work_dir/openssl.log" || true
             )"
             if printf '%s' "$verify_result" | grep -q 'Verify return code: 0 (ok)'; then
-              echo "CERTIFICATE_CHAIN=verified_complete"
+              chain_status="verified_complete"
             else
-              echo "CERTIFICATE_CHAIN=not_verified"
+              chain_status="not_verified"
             fi
+            echo "CERTIFICATE_CHAIN=$chain_status"
 
             if [ "$curl_status" -ne 0 ]; then
               diagnostic_status="$(
@@ -124,6 +126,41 @@ jobs:
                 "$url" "$diagnostic_status" \
                 "$(cat "$work_dir/insecure-body" 2>/dev/null || true)"
             fi
+
+            curl_error="$(
+              grep -E '^curl: \([0-9]+\)' "$work_dir/curl-verified.log" \
+                | tail -n 1 || true
+            )"
+            if [ -f "$work_dir/cert-01.pem" ]; then
+              certificate_details="$(
+                openssl x509 -in "$work_dir/cert-01.pem" -noout \
+                  -subject -issuer -startdate -enddate -ext subjectAltName \
+                  | tr '\n' ';'
+              )"
+            else
+              certificate_details="leaf certificate unavailable"
+            fi
+            annotation="url=$url | curl_error=${curl_error:-none} | $certificate_details | chain=$chain_status | verified_http_status=${http_status:-none}"
+            annotation="${annotation//'%'/'%25'}"
+            annotation="${annotation//$'\r'/'%0D'}"
+            annotation="${annotation//$'\n'/'%0A'}"
+            if [ "$curl_status" -eq 0 ]; then
+              annotation_level="notice"
+            else
+              annotation_level="error"
+            fi
+            printf '::%s title=TLS diagnostic for %s::%s\n' \
+              "$annotation_level" "$host" "$annotation"
+            {
+              printf '### `%s`\n\n' "$url"
+              printf -- '- Verified curl result: `%s`\n' \
+                "$([ "$curl_status" -eq 0 ] && echo passed || echo failed)"
+              printf -- '- Exact curl error: `%s`\n' "${curl_error:-none}"
+              printf -- '- Certificate: `%s`\n' "$certificate_details"
+              printf -- '- Server certificate count: `%s`\n' "$cert_count"
+              printf -- '- Certificate chain: `%s`\n' "$chain_status"
+              printf -- '- Verified HTTP status: `%s`\n\n' "${http_status:-none}"
+            } >>"$GITHUB_STEP_SUMMARY"
 
             echo "::endgroup::"
             return "$curl_status"
