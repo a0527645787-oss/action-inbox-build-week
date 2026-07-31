@@ -40,9 +40,39 @@ jobs:
       - name: Build application image
         run: docker build --tag actioninbox:${{ github.sha }} .
 
+      - name: Diagnose production TLS and health
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          curl -v --fail --connect-timeout 10 --max-time 30 https://actioninboxapp.com/health
+          curl -v --fail --connect-timeout 10 --max-time 30 https://www.actioninboxapp.com/health
+
+          verify_health() {
+            local url="$1"
+            local response body status
+            response="$(
+              curl --silent --show-error --fail \
+                --connect-timeout 10 --max-time 30 \
+                --write-out $'\n%{http_code}' \
+                "$url"
+            )"
+            status="${response##*$'\n'}"
+            body="${response%$'\n'*}"
+            test "$status" = "200"
+            test "$body" = '{"status":"ok"}'
+            printf 'Verified %s: HTTP %s, body %s\n' "$url" "$status" "$body"
+          }
+
+          verify_health https://actioninboxapp.com/health
+          verify_health https://www.actioninboxapp.com/health
+
   deploy:
     name: Deploy to EC2 through SSM
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      !contains(github.event.head_commit.message, '[diagnostic-only]')
     needs: test-and-build
     runs-on: ubuntu-latest
     timeout-minutes: 20
