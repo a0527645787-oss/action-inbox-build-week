@@ -43,29 +43,96 @@ jobs:
       - name: Diagnose production TLS and health
         shell: bash
         run: |
-          set -Eeuo pipefail
+          set -uo pipefail
 
-          curl -v --fail --connect-timeout 10 --max-time 30 https://actioninboxapp.com/health
-          curl -v --fail --connect-timeout 10 --max-time 30 https://www.actioninboxapp.com/health
-
-          verify_health() {
+          diagnose_health() {
             local url="$1"
-            local response body status
-            response="$(
-              curl --silent --show-error --fail \
-                --connect-timeout 10 --max-time 30 \
-                --write-out $'\n%{http_code}' \
-                "$url"
+            local host="${url#https://}"
+            local work_dir curl_status http_status body verify_result cert_count
+            host="${host%%/*}"
+            work_dir="$(mktemp -d)"
+
+            echo "::group::TLS and health diagnostics for $url"
+
+            http_status="$(
+              curl -v --fail --connect-timeout 10 --max-time 30 \
+                --output "$work_dir/body" \
+                --write-out '%{http_code}' \
+                "$url" 2>"$work_dir/curl-verified.log"
             )"
-            status="${response##*$'\n'}"
-            body="${response%$'\n'*}"
-            test "$status" = "200"
-            test "$body" = '{"status":"ok"}'
-            printf 'Verified %s: HTTP %s, body %s\n' "$url" "$status" "$body"
+            curl_status=$?
+            cat "$work_dir/curl-verified.log"
+
+            if [ "$curl_status" -eq 0 ]; then
+              body="$(cat "$work_dir/body")"
+              printf 'VERIFIED_RESULT url=%s tls=verified http_status=%s body=%s\n' \
+                "$url" "$http_status" "$body"
+              if [ "$http_status" != "200" ] || [ "$body" != '{"status":"ok"}' ]; then
+                curl_status=1
+              fi
+            else
+              printf 'VERIFIED_RESULT url=%s tls=failed curl_exit=%s\n' \
+                "$url" "$curl_status"
+            fi
+
+            openssl s_client \
+              -connect "$host:443" \
+              -servername "$host" \
+              -showcerts \
+              -verify_return_error \
+              </dev/null >"$work_dir/openssl.log" 2>&1
+            cat "$work_dir/openssl.log"
+
+            awk -v dir="$work_dir" '
+              /-----BEGIN CERTIFICATE-----/ {
+                count += 1
+                file = sprintf("%s/cert-%02d.pem", dir, count)
+                writing = 1
+              }
+              writing { print > file }
+              /-----END CERTIFICATE-----/ { writing = 0 }
+            ' "$work_dir/openssl.log"
+
+            cert_count="$(find "$work_dir" -name 'cert-*.pem' -type f | wc -l)"
+            printf 'SERVER_CERTIFICATE_COUNT=%s\n' "$cert_count"
+            if [ -f "$work_dir/cert-01.pem" ]; then
+              openssl x509 -in "$work_dir/cert-01.pem" -noout \
+                -subject -issuer -startdate -enddate -ext subjectAltName
+            else
+              echo "LEAF_CERTIFICATE=unavailable"
+            fi
+
+            verify_result="$(
+              grep -E 'Verify return code:|Verification error:' \
+                "$work_dir/openssl.log" || true
+            )"
+            if printf '%s' "$verify_result" | grep -q 'Verify return code: 0 (ok)'; then
+              echo "CERTIFICATE_CHAIN=verified_complete"
+            else
+              echo "CERTIFICATE_CHAIN=not_verified"
+            fi
+
+            if [ "$curl_status" -ne 0 ]; then
+              diagnostic_status="$(
+                curl -k --silent --show-error \
+                  --connect-timeout 10 --max-time 30 \
+                  --output "$work_dir/insecure-body" \
+                  --write-out '%{http_code}' \
+                  "$url" || true
+              )"
+              printf 'INSECURE_DIAGNOSTIC_ONLY url=%s http_status=%s body=%s\n' \
+                "$url" "$diagnostic_status" \
+                "$(cat "$work_dir/insecure-body" 2>/dev/null || true)"
+            fi
+
+            echo "::endgroup::"
+            return "$curl_status"
           }
 
-          verify_health https://actioninboxapp.com/health
-          verify_health https://www.actioninboxapp.com/health
+          overall_status=0
+          diagnose_health https://actioninboxapp.com/health || overall_status=1
+          diagnose_health https://www.actioninboxapp.com/health || overall_status=1
+          exit "$overall_status"
 
   deploy:
     name: Deploy to EC2 through SSM
