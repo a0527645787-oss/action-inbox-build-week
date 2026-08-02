@@ -87,6 +87,24 @@ jobs:
                   'unset session_secret; sudo chmod 600 /opt/actioninbox/.env; fi'
               ),
               "sudo -u ubuntu git -C /opt/actioninbox/repo fetch origin main",
+              (
+                  'dirty_paths="$(sudo -u ubuntu git -C /opt/actioninbox/repo '
+                  'status --porcelain --untracked-files=no | '
+                  'grep -v "^ M deploy/nginx.conf$" || true)"; '
+                  'if [ -n "$dirty_paths" ]; then '
+                  'echo "Unexpected tracked server changes prevent deployment" >&2; '
+                  'printf "%s\\n" "$dirty_paths" >&2; exit 1; fi'
+              ),
+              (
+                  'if ! sudo -u ubuntu git -C /opt/actioninbox/repo '
+                  'diff --quiet -- deploy/nginx.conf; then '
+                  'sudo install -d -m 700 /opt/actioninbox/backups; '
+                  'sudo cp /opt/actioninbox/repo/deploy/nginx.conf '
+                  f'/opt/actioninbox/backups/nginx.conf.pre-{sha}; '
+                  f'sudo chmod 600 /opt/actioninbox/backups/nginx.conf.pre-{sha}; '
+                  'sudo -u ubuntu git -C /opt/actioninbox/repo checkout -- '
+                  'deploy/nginx.conf; fi'
+              ),
               f"sudo -u ubuntu git -C /opt/actioninbox/repo checkout --detach {sha}",
               "cd /opt/actioninbox/repo",
               (
