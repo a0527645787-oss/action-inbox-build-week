@@ -5,7 +5,7 @@
 <section class="hero landing-hero">
   <div class="hero-glow hero-glow-one" aria-hidden="true"></div>
   <div class="hero-glow hero-glow-two" aria-hidden="true"></div>
-  <span class="eyebrow">OpenAI Build Week 2026</span>
+  <span class="eyebrow">A personal AI productivity skill</span>
   <h1>Your inbox, translated into action.</h1>
   <p class="hero-lede">
     ActionInbox reads a small, recent slice of your inbox, identifies supported
@@ -15,16 +15,31 @@
   {% if demo_error %}<p class="notice">The safe demo could not be prepared. Please try again.</p>{% endif %}
   <div class="hero-actions">
     <a class="button landing-cta primary-cta" href="/auth/google/start">
-      <span>Connect Gmail</span><span aria-hidden="true">→</span>
+      <span>Connect Gmail</span><span aria-hidden="true">&rarr;</span>
     </a>
     <form method="post" action="/demo">
       <button class="button secondary landing-cta" type="submit">
-        <span>View safe demo</span><span aria-hidden="true">↗</span>
+        <span>View safe demo</span><span aria-hidden="true">&#8599;</span>
       </button>
     </form>
   </div>
-  <p class="trust-line">Read-only Gmail access · Manual sync · Exact evidence · Separate private sessions</p>
+  <p class="trust-line">Read-only Gmail access &middot; Manual sync &middot; Exact evidence &middot; Separate private sessions</p>
 </section>
+
+<aside class="pilot-notice" aria-labelledby="pilot-title">
+  <span class="pilot-status" aria-hidden="true"></span>
+  <div>
+    <h2 id="pilot-title">ActionInbox is currently in a private testing pilot.</h2>
+    <p>
+      Gmail access is available to approved testers while the integration
+      completes Google's public verification process. To request access, email
+      the developer from the Google account you would like to connect.
+    </p>
+  </div>
+  <a class="pilot-link" href="mailto:a0527645787@gmail.com?subject=ActionInbox%20testing%20access">
+    Request testing access
+  </a>
+</aside>
 
 <section class="landing-section" aria-labelledby="how-title">
   <div class="section-heading">
