@@ -23,7 +23,6 @@ from .triage import triage_unanalyzed_emails
 
 
 GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
-IDENTITY_SCOPES = {"openid", "email"}
 OAUTH_SCOPE = f"openid email {GMAIL_SCOPE}"
 GMAIL_QUERY = "in:inbox newer_than:7d -in:spam -in:trash"
 GMAIL_MESSAGE_LIMIT = 25
@@ -210,7 +209,7 @@ def complete_oauth(
         response.raise_for_status()
         tokens = response.json()
         granted = set(tokens.get("scope", "").split())
-        if GMAIL_SCOPE not in granted or not IDENTITY_SCOPES.issubset(granted):
+        if GMAIL_SCOPE not in granted:
             raise GmailSyncError("Gmail read-only scope was not granted")
         profile = owned.get(
             GOOGLE_USERINFO_URL,
@@ -218,9 +217,25 @@ def complete_oauth(
         )
         profile.raise_for_status()
         identity = profile.json()
-        google_subject = identity["sub"]
-        account_email = identity["email"]
-        display_name = identity.get("name") or account_email.split("@", 1)[0]
+        if not isinstance(identity, dict):
+            raise GmailSyncError("Google identity information is missing or invalid")
+        google_subject = identity.get("sub")
+        account_email = identity.get("email")
+        if (
+            not isinstance(google_subject, str)
+            or not google_subject.strip()
+            or not isinstance(account_email, str)
+            or not account_email.strip()
+            or account_email.count("@") != 1
+        ):
+            raise GmailSyncError("Google identity information is missing or invalid")
+        google_subject = google_subject.strip()
+        account_email = account_email.strip()
+        display_name = identity.get("name")
+        if not isinstance(display_name, str) or not display_name.strip():
+            display_name = account_email.split("@", 1)[0]
+        else:
+            display_name = display_name.strip()
     except (httpx.HTTPError, KeyError, ValueError) as exc:
         raise GmailSyncError("Google OAuth exchange failed") from exc
     finally:

@@ -3,13 +3,21 @@ import base64
 
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
+import pytest
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.analysis import analyze_email, fallback_analysis
 from app.auth import ensure_demo_user, get_current_user
 from app.database import get_db
-from app.gmail import GMAIL_QUERY, GMAIL_SCOPE, complete_oauth, encrypt_tokens, sync_gmail
+from app.gmail import (
+    GMAIL_QUERY,
+    GMAIL_SCOPE,
+    GmailSyncError,
+    complete_oauth,
+    encrypt_tokens,
+    sync_gmail,
+)
 from app.main import app
 from app.models import Analysis, Email, GmailCredential, GmailOAuthState, Task, User, utcnow
 from app.triage import triage_unanalyzed_emails
@@ -37,24 +45,28 @@ class GmailClient:
 
 
 class OAuthClient:
+    def __init__(self, scopes=None, identity=None):
+        self.scopes = scopes or (
+            f"openid https://www.googleapis.com/auth/userinfo.email {GMAIL_SCOPE}"
+        )
+        self.identity = identity or {
+            "sub": "stable-google-subject",
+            "email": "connected@example.test",
+            "name": "Connected User",
+        }
+
     def post(self, url, data=None):
         return FakeResponse(
             {
                 "access_token": "test-access",
                 "refresh_token": "test-refresh",
                 "expires_in": 3600,
-                "scope": f"openid email {GMAIL_SCOPE}",
+                "scope": self.scopes,
             }
         )
 
     def get(self, url, headers=None):
-        return FakeResponse(
-            {
-                "sub": "stable-google-subject",
-                "email": "connected@example.test",
-                "name": "Connected User",
-            }
-        )
+        return FakeResponse(self.identity)
 
 
 def _override_db(db):
@@ -78,6 +90,16 @@ def _personal_user(db, suffix="1"):
     db.add(user)
     db.commit()
     return user
+
+
+def _oauth_state(db, state):
+    db.add(
+        GmailOAuthState(
+            state_hash=__import__("hashlib").sha256(state.encode()).hexdigest(),
+            expires_at=utcnow() + timedelta(minutes=5),
+        )
+    )
+    db.commit()
 
 
 def test_gmail_sync_is_bounded_read_only_and_idempotent(db, monkeypatch):
@@ -249,18 +271,58 @@ def test_oauth_identity_uses_stable_google_subject_and_does_not_replace_other_co
         )
     )
     state = "one-time-state"
-    db.add(
-        GmailOAuthState(
-            state_hash=__import__("hashlib").sha256(state.encode()).hexdigest(),
-            expires_at=utcnow() + timedelta(minutes=5),
-        )
-    )
-    db.commit()
+    _oauth_state(db, state)
 
     user, credential = complete_oauth(db, state, "authorization-code", client=OAuthClient())
 
     assert user.google_subject == "stable-google-subject"
+    assert user.email == "connected@example.test"
     assert credential.user_id == user.id
+    assert credential.scopes == GMAIL_SCOPE
     assert db.scalar(
         select(GmailCredential).where(GmailCredential.user_id == other.id)
     ).account_email == "other@example.test"
+
+
+def test_oauth_rejects_missing_gmail_readonly_scope(db, monkeypatch):
+    monkeypatch.setenv("GMAIL_CLIENT_ID", "client-id")
+    monkeypatch.setenv("GMAIL_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("GMAIL_REDIRECT_URI", "https://example.test/auth/google/callback")
+    monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    state = "missing-gmail-scope"
+    _oauth_state(db, state)
+
+    with pytest.raises(
+        GmailSyncError, match="Gmail read-only scope was not granted"
+    ):
+        complete_oauth(
+            db,
+            state,
+            "authorization-code",
+            client=OAuthClient(
+                scopes="openid https://www.googleapis.com/auth/userinfo.email"
+            ),
+        )
+
+    assert db.scalar(select(func.count()).select_from(GmailCredential)) == 0
+
+
+def test_oauth_rejects_missing_google_identity(db, monkeypatch):
+    monkeypatch.setenv("GMAIL_CLIENT_ID", "client-id")
+    monkeypatch.setenv("GMAIL_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("GMAIL_REDIRECT_URI", "https://example.test/auth/google/callback")
+    monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    state = "missing-google-identity"
+    _oauth_state(db, state)
+
+    with pytest.raises(
+        GmailSyncError, match="Google identity information is missing or invalid"
+    ):
+        complete_oauth(
+            db,
+            state,
+            "authorization-code",
+            client=OAuthClient(identity={"email": "connected@example.test"}),
+        )
+
+    assert db.scalar(select(func.count()).select_from(GmailCredential)) == 0
