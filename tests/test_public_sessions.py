@@ -45,6 +45,9 @@ def test_anonymous_browser_sees_only_public_landing_and_private_routes_redirect(
             assert landing.status_code == 200
             assert "Connect Gmail" in landing.text
             assert "View safe demo" in landing.text
+            assert "https://mail.google.com/mail/?view=cm" in landing.text
+            assert "to=a0527645787@gmail.com" in landing.text
+            assert 'target="_blank"' in landing.text
             for path in (
                 "/inbox",
                 "/dashboard",
