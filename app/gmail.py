@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import secrets
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -16,17 +17,22 @@ from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .analysis import analyze_email
-from .models import Email, GmailCredential, GmailOAuthState, User, utcnow
+from .auth import DEMO_USER_ID
+from .models import Analysis, Email, GmailCredential, GmailOAuthState, Task, User, utcnow
+from .triage import triage_unanalyzed_emails
 
 
 GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+IDENTITY_SCOPES = {"openid", "email"}
+OAUTH_SCOPE = f"openid email {GMAIL_SCOPE}"
 GMAIL_QUERY = "in:inbox newer_than:7d -in:spam -in:trash"
 GMAIL_MESSAGE_LIMIT = 25
 GMAIL_TASK_LIMIT = 20
 GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
+GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 logger = logging.getLogger(__name__)
 
 
@@ -35,6 +41,10 @@ class GmailConfigurationError(RuntimeError):
 
 
 class GmailSyncError(RuntimeError):
+    pass
+
+
+class GmailReconnectRequired(GmailSyncError):
     pass
 
 
@@ -76,26 +86,117 @@ def decrypt_tokens(value: str) -> dict:
         raise GmailConfigurationError("Stored Gmail credential cannot be decrypted") from exc
 
 
-def begin_oauth(db: Session, user: User) -> str:
+def begin_oauth(db: Session) -> tuple[str, str]:
     state = secrets.token_urlsafe(32)
-    db.add(GmailOAuthState(user_id=user.id, state_hash=hashlib.sha256(state.encode()).hexdigest(), expires_at=utcnow() + timedelta(minutes=10)))
+    db.add(
+        GmailOAuthState(
+            user_id=None,
+            state_hash=hashlib.sha256(state.encode()).hexdigest(),
+            expires_at=utcnow() + timedelta(minutes=10),
+        )
+    )
     db.commit()
     params = {
         "client_id": _required("GMAIL_CLIENT_ID"),
         "redirect_uri": _required("GMAIL_REDIRECT_URI"),
         "response_type": "code",
-        "scope": GMAIL_SCOPE,
+        "scope": OAUTH_SCOPE,
         "access_type": "offline",
         "include_granted_scopes": "false",
         "prompt": "consent",
         "state": state,
     }
-    return f"{GOOGLE_AUTH_URL}?{urlencode(params)}"
+    return f"{GOOGLE_AUTH_URL}?{urlencode(params)}", state
 
 
-def complete_oauth(db: Session, user: User, state: str, code: str, client: httpx.Client | None = None) -> GmailCredential:
+def _copy_legacy_gmail_data(db: Session, user: User, account_email: str) -> int:
+    legacy_credential = db.scalar(
+        select(GmailCredential).where(
+            GmailCredential.user_id == DEMO_USER_ID,
+            GmailCredential.account_email == account_email,
+        )
+    )
+    if legacy_credential is None:
+        return 0
+    moved = 0
+    legacy_emails = db.scalars(
+        select(Email).where(Email.user_id == DEMO_USER_ID, Email.source == "gmail")
+    ).all()
+    for source in legacy_emails:
+        target = db.scalar(
+            select(Email).where(
+                Email.user_id == user.id,
+                Email.gmail_message_id == source.gmail_message_id,
+            )
+        )
+        if target is None:
+            target = Email(
+                user_id=user.id,
+                external_id=source.external_id,
+                gmail_message_id=source.gmail_message_id,
+                gmail_thread_id=source.gmail_thread_id,
+                sender=source.sender,
+                subject=source.subject,
+                received_at=source.received_at,
+                body=source.body,
+                source="gmail",
+                analyzed=source.analyzed,
+            )
+            db.add(target)
+            db.flush()
+        if source.analysis and target.analysis is None:
+            item = source.analysis
+            db.add(
+                Analysis(
+                    user_id=user.id,
+                    email_id=target.id,
+                    classification=item.classification,
+                    action_required=item.action_required,
+                    summary=item.summary,
+                    evidence_quote=item.evidence_quote,
+                    evidence_start=item.evidence_start,
+                    evidence_end=item.evidence_end,
+                    suggestion=item.suggestion,
+                    structured_result=item.structured_result,
+                    source=item.source,
+                    model=item.model,
+                    error_message=item.error_message,
+                    analyzed_at=item.analyzed_at,
+                )
+            )
+        if source.task and target.task is None:
+            item = source.task
+            db.add(
+                Task(
+                    user_id=user.id,
+                    email_id=target.id,
+                    title=item.title,
+                    deadline=item.deadline,
+                    deadline_text=item.deadline_text,
+                )
+            )
+        db.delete(source)
+        moved += 1
+    db.delete(legacy_credential)
+    db.flush()
+    logger.info(
+        "Claimed legacy Gmail data account_fingerprint=%s messages_moved=%s",
+        hashlib.sha256(account_email.casefold().encode()).hexdigest()[:12],
+        moved,
+    )
+    return moved
+
+
+def complete_oauth(
+    db: Session,
+    state: str,
+    code: str,
+    client: httpx.Client | None = None,
+) -> tuple[User, GmailCredential]:
     state_hash = hashlib.sha256(state.encode()).hexdigest()
-    oauth_state = db.scalar(select(GmailOAuthState).where(GmailOAuthState.state_hash == state_hash, GmailOAuthState.user_id == user.id))
+    oauth_state = db.scalar(
+        select(GmailOAuthState).where(GmailOAuthState.state_hash == state_hash)
+    )
     if not oauth_state or oauth_state.used_at or oauth_state.expires_at < utcnow():
         raise GmailSyncError("OAuth state is invalid or expired")
     oauth_state.used_at = utcnow()
@@ -109,25 +210,57 @@ def complete_oauth(db: Session, user: User, state: str, code: str, client: httpx
         response.raise_for_status()
         tokens = response.json()
         granted = set(tokens.get("scope", "").split())
-        if GMAIL_SCOPE not in granted:
+        if GMAIL_SCOPE not in granted or not IDENTITY_SCOPES.issubset(granted):
             raise GmailSyncError("Gmail read-only scope was not granted")
-        profile = owned.get(f"{GMAIL_API}/profile", headers={"Authorization": f"Bearer {tokens['access_token']}"})
+        profile = owned.get(
+            GOOGLE_USERINFO_URL,
+            headers={"Authorization": f"Bearer {tokens['access_token']}"},
+        )
         profile.raise_for_status()
-        account_email = profile.json()["emailAddress"]
+        identity = profile.json()
+        google_subject = identity["sub"]
+        account_email = identity["email"]
+        display_name = identity.get("name") or account_email.split("@", 1)[0]
     except (httpx.HTTPError, KeyError, ValueError) as exc:
         raise GmailSyncError("Google OAuth exchange failed") from exc
     finally:
         if client is None:
             owned.close()
     tokens["expires_at"] = (datetime.now(UTC) + timedelta(seconds=int(tokens.get("expires_in", 3600)))).isoformat()
-    credential = db.scalar(select(GmailCredential).where(GmailCredential.user_id == user.id, GmailCredential.account_email == account_email))
+    user = db.scalar(select(User).where(User.google_subject == google_subject))
+    if user is None:
+        user = db.scalar(select(User).where(User.email == account_email))
+        if user is not None and user.id == DEMO_USER_ID:
+            user = None
+    if user is None:
+        user = User(
+            id=str(uuid.uuid4()),
+            google_subject=google_subject,
+            email=account_email,
+            display_name=display_name[:255],
+        )
+        db.add(user)
+        db.flush()
+    elif user.google_subject is None:
+        user.google_subject = google_subject
+    user.email = account_email
+    user.display_name = display_name[:255]
+    _copy_legacy_gmail_data(db, user, account_email)
+    credential = db.scalar(
+        select(GmailCredential).where(
+            GmailCredential.user_id == user.id,
+            GmailCredential.account_email == account_email,
+        )
+    )
     if credential is None:
         credential = GmailCredential(user_id=user.id, account_email=account_email, encrypted_token="", scopes=GMAIL_SCOPE)
         db.add(credential)
     credential.encrypted_token = encrypt_tokens(tokens)
     credential.scopes = GMAIL_SCOPE
-    db.commit(); db.refresh(credential)
-    return credential
+    oauth_state.user_id = user.id
+    db.commit()
+    db.refresh(credential)
+    return user, credential
 
 
 def _access_token(credential: GmailCredential, client: httpx.Client) -> str:
@@ -146,6 +279,15 @@ def _access_token(credential: GmailCredential, client: httpx.Client) -> str:
             "refresh_token": refresh_token, "grant_type": "refresh_token",
         })
         response.raise_for_status(); refreshed = response.json()
+    except httpx.HTTPStatusError as exc:
+        error_code = ""
+        try:
+            error_code = exc.response.json().get("error", "")
+        except (ValueError, AttributeError):
+            pass
+        if error_code == "invalid_grant":
+            raise GmailReconnectRequired("Gmail authorization expired; reconnect Gmail") from exc
+        raise GmailSyncError("Gmail token refresh failed") from exc
     except (httpx.HTTPError, ValueError) as exc:
         raise GmailSyncError("Gmail token refresh failed") from exc
     tokens.update(refreshed); tokens["refresh_token"] = refresh_token
@@ -188,8 +330,17 @@ def _received_at(message: dict) -> datetime:
         return utcnow()
 
 
-def sync_gmail(db: Session, user: User, credential: GmailCredential, client: httpx.Client | None = None) -> GmailSyncResult:
-    if credential.user_id != user.id or credential.scopes != GMAIL_SCOPE:
+def sync_gmail(
+    db: Session,
+    user: User,
+    credential: GmailCredential,
+    client: httpx.Client | None = None,
+) -> GmailSyncResult:
+    if (
+        user.id == DEMO_USER_ID
+        or credential.user_id != user.id
+        or GMAIL_SCOPE not in credential.scopes.split()
+    ):
         raise GmailSyncError("Gmail credential ownership or scope is invalid")
     owned = client or httpx.Client(timeout=30)
     try:
@@ -204,10 +355,11 @@ def sync_gmail(db: Session, user: User, credential: GmailCredential, client: htt
                 select(Email).where(Email.user_id == user.id, Email.gmail_message_id.is_not(None))
             ).all()
         }
-        imported = tasks_created = analysis_failures = 0
+        imported = 0
+        email_ids_to_analyze: list[int] = []
         for item in candidates:
             message_id = item.get("id")
-            if not message_id or tasks_created >= GMAIL_TASK_LIMIT:
+            if not message_id:
                 continue
             email = existing_by_id.get(message_id)
             if email is not None and email.analyzed and email.analysis is not None:
@@ -228,24 +380,57 @@ def sync_gmail(db: Session, user: User, credential: GmailCredential, client: htt
                 db.add(email); db.commit(); db.refresh(email)
                 existing_by_id[message_id] = email
                 imported += 1
-            try:
-                analysis = analyze_email(db, email)
-            except Exception as exc:
-                db.rollback()
-                analysis_failures += 1
-                message_fingerprint = hashlib.sha256(message_id.encode()).hexdigest()[:12]
-                logger.warning(
-                    "Gmail analysis failed exception_class=%s message_fingerprint=%s",
-                    type(exc).__name__,
-                    message_fingerprint,
-                )
-                continue
-            if analysis.action_required and email.task:
-                tasks_created += 1
-        credential.last_synced_at = utcnow(); db.commit()
-        return GmailSyncResult(GMAIL_QUERY, len(candidates), imported, tasks_created, analysis_failures)
+            email_ids_to_analyze.append(email.id)
+        triage = triage_unanalyzed_emails(
+            db,
+            user.id,
+            email_ids=email_ids_to_analyze,
+            source="gmail",
+            continue_on_error=True,
+            max_tasks=GMAIL_TASK_LIMIT,
+        )
+        credential.last_synced_at = utcnow()
+        db.commit()
+        return GmailSyncResult(
+            GMAIL_QUERY,
+            len(candidates),
+            imported,
+            triage.tasks_created,
+            triage.failures,
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in {401, 403}:
+            raise GmailReconnectRequired("Gmail authorization expired; reconnect Gmail") from exc
+        raise GmailSyncError("Gmail read-only sync failed") from exc
     except httpx.HTTPError as exc:
         raise GmailSyncError("Gmail read-only sync failed") from exc
+    finally:
+        if client is None:
+            owned.close()
+
+
+def disconnect_gmail(
+    db: Session,
+    user: User,
+    credential: GmailCredential,
+    client: httpx.Client | None = None,
+) -> None:
+    if credential.user_id != user.id:
+        raise GmailSyncError("Gmail credential ownership is invalid")
+    owned = client or httpx.Client(timeout=15)
+    try:
+        tokens = decrypt_tokens(credential.encrypted_token)
+        token = tokens.get("refresh_token") or tokens.get("access_token")
+        if token:
+            try:
+                owned.post(GOOGLE_REVOKE_URL, data={"token": token})
+            except httpx.HTTPError:
+                logger.warning(
+                    "Gmail revocation request failed user_fingerprint=%s",
+                    hashlib.sha256(user.id.encode()).hexdigest()[:12],
+                )
+        db.delete(credential)
+        db.commit()
     finally:
         if client is None:
             owned.close()

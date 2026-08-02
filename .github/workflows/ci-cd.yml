@@ -79,6 +79,13 @@ jobs:
               "set -eu",
               "test -f /opt/actioninbox/.env",
               "test -d /opt/actioninbox/repo/.git",
+              (
+                  'if ! sudo grep -Eq "^SESSION_SECRET=.{32,}$" /opt/actioninbox/.env; then '
+                  'session_secret="$(openssl rand -hex 32)"; '
+                  'printf "\\nSESSION_SECRET=%s\\n" "$session_secret" | '
+                  'sudo tee -a /opt/actioninbox/.env >/dev/null; '
+                  'unset session_secret; sudo chmod 600 /opt/actioninbox/.env; fi'
+              ),
               "sudo -u ubuntu git -C /opt/actioninbox/repo fetch origin main",
               f"sudo -u ubuntu git -C /opt/actioninbox/repo checkout --detach {sha}",
               "cd /opt/actioninbox/repo",

@@ -30,14 +30,14 @@ def test_fresh_demo_post_ingests_and_triages_automatically_without_get_mutation(
             assert client.get("/demo").status_code == 405
             assert db.scalar(select(func.count()).select_from(Email)) == 0
             response = client.post("/demo", follow_redirects=False)
-            assert response.headers["location"] == "/dashboard?emails_checked=5&tasks_created=3"
+            assert response.headers["location"] == "/dashboard?emails_checked=5&tasks_created=3&failures=0"
             assert db.scalar(select(func.count()).select_from(Email).where(Email.user_id == user.id)) == 5
             assert db.scalar(select(func.count()).select_from(Analysis).where(Analysis.user_id == user.id)) == 5
             assert db.scalar(select(func.count()).select_from(Task).where(Task.user_id == user.id)) == 3
             non_actionable = select(Email.id).where(Email.external_id.in_(["demo-info", "demo-newsletter"]))
             assert db.scalar(select(func.count()).select_from(Task).where(Task.email_id.in_(non_actionable))) == 0
             reopened = client.post("/demo", follow_redirects=False)
-            assert reopened.headers["location"] == "/dashboard?emails_checked=0&tasks_created=0"
+            assert reopened.headers["location"] == "/dashboard?emails_checked=0&tasks_created=0&failures=0"
             assert db.scalar(select(func.count()).select_from(Task).where(Task.user_id == user.id)) == 3
     finally:
         app.dependency_overrides.clear()
@@ -54,11 +54,9 @@ def test_automatic_and_manual_triage_remain_tenant_scoped(db):
             client.post("/demo")
             assert other_email.analyzed is False
             assert db.scalar(select(Analysis).where(Analysis.email_id == other_email.id)) is None
-            manual = dict(DEMO_EMAILS[0]); manual["external_id"] = "manual-demo-invoice"
-            db.add(Email(**manual, user_id=demo.id, source="test")); db.commit()
             response = client.post("/api/inbox/analyze-all", follow_redirects=False)
-            assert response.headers["location"] == "/dashboard?emails_checked=1&tasks_created=1"
-            assert db.scalar(select(func.count()).select_from(Task).where(Task.user_id == demo.id)) == 4
+            assert response.headers["location"] == "/"
+            assert db.scalar(select(func.count()).select_from(Task).where(Task.user_id == demo.id)) == 3
             assert other_email.analyzed is False
     finally:
         app.dependency_overrides.clear()

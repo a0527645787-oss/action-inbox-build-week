@@ -29,7 +29,9 @@ def test_production_mode_fails_closed_without_authentication(db, monkeypatch):
     app.dependency_overrides[get_db] = override_db
     try:
         with TestClient(app) as client:
-            assert client.get("/inbox").status_code == 503
+            response = client.get("/inbox", follow_redirects=False)
+            assert response.status_code == 303
+            assert response.headers["location"] == "/"
             assert client.get("/health").status_code == 200
     finally:
         app.dependency_overrides.clear()

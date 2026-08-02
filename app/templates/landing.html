@@ -4,7 +4,13 @@
 <section class="hero">
   <span class="eyebrow">OpenAI Build Week 2026</span>
   <h1>Turn email into clear, evidence-backed work.</h1>
-  <p>ActionInbox finds the task, proves where it came from, explains how to complete it, and prepares it for safe execution.</p>
-  <form method="post" action="/demo"><button class="button" type="submit">Start the public demo</button></form>
+  <p>ActionInbox finds the task, proves where it came from, and keeps each connected inbox isolated in its own session.</p>
+  {% if demo_error %}<p class="notice">The safe demo could not be prepared. Please try again.</p>{% endif %}
+  <div class="hero-actions">
+    <a class="button" href="/auth/google/start">Connect Gmail</a>
+    <form method="post" action="/demo">
+      <button class="button secondary" type="submit">View safe demo</button>
+    </form>
+  </div>
 </section>
 {% endblock %}

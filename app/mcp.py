@@ -1,6 +1,4 @@
 import json
-import os
-import secrets
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response
@@ -67,14 +65,9 @@ def _task_view(task: Task) -> dict:
 
 
 async def handle_mcp(request: Request, db: Session):
-    configured = os.getenv("MCP_ACCESS_TOKEN", "")
-    supplied = request.headers.get("authorization", "")
-    authenticated = False
-    if supplied:
-        if not configured or not supplied.startswith("Bearer ") or not secrets.compare_digest(supplied[7:], configured):
-            return JSONResponse({"error": "MCP authentication required"}, status_code=401, headers={"WWW-Authenticate": 'Bearer realm="ActionInbox MCP"'})
-        authenticated = True
-    public_demo = not authenticated
+    # The public MCP surface is intentionally limited to synthetic demo data.
+    # Personal data is available only through the browser's user-scoped session.
+    public_demo = True
     try:
         body = await request.json()
     except ValueError:
@@ -90,7 +83,7 @@ async def handle_mcp(request: Request, db: Session):
     if method != "tools/call":
         return _response(request_id, error={"code": -32601, "message": "Method not found"})
     params = body.get("params", {}); name = params.get("name"); arguments = params.get("arguments") or {}
-    user_id = DEMO_USER_ID if public_demo else os.getenv("MCP_USER_ID", DEMO_USER_ID)
+    user_id = DEMO_USER_ID
     if name == "list_actioninbox_tasks":
         tasks = db.scalars(_task_scope(db, user_id, public_demo).order_by(Task.deadline)).all()
         data = [{"id": task.id, "title": task.title, "deadline": task.deadline_text, "summary": task.email.analysis.summary} for task in tasks]

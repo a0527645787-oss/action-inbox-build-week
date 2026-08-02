@@ -59,6 +59,8 @@ def result_for(body, *, url=None):
 def test_valid_structured_analysis_is_persisted_as_live(db):
     load_demo_emails(db)
     email = db.scalar(select(Email).where(Email.external_id == "demo-invoice"))
+    email.source = "test"
+    db.commit()
     quote = "Please approve invoice INV-2048 for USD 1,280 by July 21, 2026."
     start = email.body.index(quote)
     output = EmailAnalysisResult.model_validate({
@@ -126,10 +128,11 @@ def test_prompt_injection_remains_untrusted_data():
     assert request["store"] is False
 
 
-def test_oversized_email_is_rejected_before_api_request():
-    import pytest
-    with pytest.raises(LiveAnalysisError, match="character analysis limit"):
-        build_input("sender@example.test", "Subject", "x" * (MAX_EMAIL_CHARS + 1))
+def test_oversized_email_is_bounded_before_api_request():
+    request = build_input("sender@example.test", "Subject", "x" * (MAX_EMAIL_CHARS + 1))
+    content = request[1]["content"]
+    assert "x" * MAX_EMAIL_CHARS in content
+    assert "x" * (MAX_EMAIL_CHARS + 1) not in content
 
 
 def test_openai_error_logging_is_diagnostic_and_redacted(caplog, monkeypatch):
@@ -152,6 +155,8 @@ def test_openai_error_logging_is_diagnostic_and_redacted(caplog, monkeypatch):
 def test_missing_ca_bundle_falls_back_safely(db, monkeypatch):
     load_demo_emails(db)
     email = db.scalar(select(Email).where(Email.external_id == "demo-invoice"))
+    email.source = "test"
+    db.commit()
     monkeypatch.setenv("OPENAI_API_KEY", "test-only-key")
     monkeypatch.setenv("OPENAI_CA_BUNDLE", "/missing/actioninbox-ca.pem")
     analysis = analyze_email(db, email)

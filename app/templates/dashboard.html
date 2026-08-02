@@ -3,9 +3,12 @@
 {% block content %}
 <div class="heading">
   <div>
-    <span class="eyebrow">Action dashboard</span><h1>Your next actions</h1>
-    <p>ActionInbox found the task, proved where it came from, explained how to complete it, and prepared it for safe execution.</p>
-    {% if emails_checked or tasks_created %}<p class="result-banner"><strong>{{ emails_checked }} emails checked · {{ tasks_created }} actionable tasks created.</strong></p>{% endif %}
+    <span class="eyebrow">Action dashboard</span>
+    <h1>Your next actions</h1>
+    <p>Every task remains scoped to the current signed session and backed by exact email evidence.</p>
+    {% if emails_checked or tasks_created or failures %}
+    <p class="result-banner"><strong>{{ emails_checked }} emails checked · {{ tasks_created }} actionable tasks created{% if failures %} · {{ failures }} messages need a safe retry{% endif %}.</strong></p>
+    {% endif %}
   </div>
   <a class="button secondary" href="/inbox">View inbox</a>
 </div>
@@ -14,12 +17,21 @@
   {% for task in tasks %}
   <a class="card task-card" href="/tasks/{{ task.id }}">
     <span class="badge">{{ task.email.analysis.classification|replace('_',' ') }}</span>
-    <h2>{{ task.title }}</h2><p>{{ task.email.analysis.summary }}</p>
+    <h2>{{ task.title }}</h2>
+    <p>{{ task.email.analysis.summary }}</p>
     <div class="deadline"><span>Deadline</span><strong>{{ task.deadline_text or 'No deadline' }}</strong></div>
   </a>
   {% endfor %}
 </section>
 {% else %}
-<section class="empty"><h2>No tasks yet</h2><p>Start the demo to ingest and automatically analyze the synthetic inbox.</p><form method="post" action="/demo"><button class="button" type="submit">Start demo</button></form></section>
+<section class="empty">
+  <h2>No tasks yet</h2>
+  <p>{{ 'The safe demo contains no additional tasks.' if is_demo else 'Connect Gmail or check for new messages to create evidence-backed tasks.' }}</p>
+  {% if is_demo %}
+  <a class="button" href="/auth/google/start">Connect your own Gmail</a>
+  {% else %}
+  <a class="button" href="/gmail">Open Gmail sync</a>
+  {% endif %}
+</section>
 {% endif %}
 {% endblock %}

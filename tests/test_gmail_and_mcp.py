@@ -9,9 +9,9 @@ from sqlalchemy.exc import IntegrityError
 from app.analysis import analyze_email, fallback_analysis
 from app.auth import ensure_demo_user, get_current_user
 from app.database import get_db
-from app.gmail import GMAIL_QUERY, GMAIL_SCOPE, encrypt_tokens, sync_gmail
+from app.gmail import GMAIL_QUERY, GMAIL_SCOPE, complete_oauth, encrypt_tokens, sync_gmail
 from app.main import app
-from app.models import Analysis, Email, GmailCredential, Task
+from app.models import Analysis, Email, GmailCredential, GmailOAuthState, Task, User, utcnow
 from app.triage import triage_unanalyzed_emails
 
 
@@ -36,6 +36,27 @@ class GmailClient:
     def post(self, *args, **kwargs): raise AssertionError("Gmail sync must not POST to Google")
 
 
+class OAuthClient:
+    def post(self, url, data=None):
+        return FakeResponse(
+            {
+                "access_token": "test-access",
+                "refresh_token": "test-refresh",
+                "expires_in": 3600,
+                "scope": f"openid email {GMAIL_SCOPE}",
+            }
+        )
+
+    def get(self, url, headers=None):
+        return FakeResponse(
+            {
+                "sub": "stable-google-subject",
+                "email": "connected@example.test",
+                "name": "Connected User",
+            }
+        )
+
+
 def _override_db(db):
     def dependency():
         yield db
@@ -47,13 +68,25 @@ def _token(monkeypatch):
     return encrypt_tokens({"access_token": "test-access", "refresh_token": "test-refresh", "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()})
 
 
+def _personal_user(db, suffix="1"):
+    user = User(
+        id=f"90000000-0000-0000-0000-00000000000{suffix}",
+        email=f"pilot{suffix}@example.test",
+        display_name=f"Pilot {suffix}",
+        google_subject=f"google-subject-{suffix}",
+    )
+    db.add(user)
+    db.commit()
+    return user
+
+
 def test_gmail_sync_is_bounded_read_only_and_idempotent(db, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(
         "app.analysis.request_live_analysis",
         lambda email, client=None, resources=None: fallback_analysis(email, resources),
     )
-    user = ensure_demo_user(db)
+    user = _personal_user(db)
     credential = GmailCredential(user_id=user.id, account_email="pilot@example.test", encrypted_token=_token(monkeypatch), scopes=GMAIL_SCOPE)
     db.add(credential); db.commit()
     client = GmailClient()
@@ -84,7 +117,7 @@ def test_gmail_timeout_is_retained_and_successful_retry_does_not_duplicate(db, m
     from app.openai_analysis import LiveAnalysisError
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    user = ensure_demo_user(db)
+    user = _personal_user(db)
     credential = GmailCredential(user_id=user.id, account_email="pilot@example.test",
                                  encrypted_token=_token(monkeypatch), scopes=GMAIL_SCOPE)
     db.add(credential); db.commit()
@@ -178,17 +211,17 @@ def test_public_mcp_is_no_auth_read_only_and_synthetic_demo_only(db, monkeypatch
         assert package["review_required"] is True and package["executed"] is False
 
         assert client.post("/mcp", headers={"Authorization": "Bearer wrong"},
-                           json={"jsonrpc": "2.0", "id": 6, "method": "tools/list"}).status_code == 401
+                           json={"jsonrpc": "2.0", "id": 6, "method": "tools/list"}).status_code == 200
         authenticated = client.post("/mcp", headers={"Authorization": "Bearer mcp-test-token"},
                                     json={"jsonrpc": "2.0", "id": 7, "method": "tools/call",
                                           "params": {"name": "get_actioninbox_task", "arguments": {"task_id": private_task.id}}})
-        assert authenticated.status_code == 200 and "PRIVATE GMAIL SUMMARY" in authenticated.text
+        assert authenticated.status_code == 200 and authenticated.json()["error"]["message"] == "Task not found"
     finally:
         app.dependency_overrides.clear()
 
 
 def test_gmail_page_discloses_exact_scope(db):
-    user = ensure_demo_user(db)
+    user = _personal_user(db)
     app.dependency_overrides[get_db] = _override_db(db)
     app.dependency_overrides[get_current_user] = lambda: user
     try:
@@ -199,3 +232,35 @@ def test_gmail_page_discloses_exact_scope(db):
         assert "25 per sync" in response.text and "20 newly created tasks" in response.text
     finally:
         app.dependency_overrides.clear()
+
+
+def test_oauth_identity_uses_stable_google_subject_and_does_not_replace_other_connection(db, monkeypatch):
+    monkeypatch.setenv("GMAIL_CLIENT_ID", "client-id")
+    monkeypatch.setenv("GMAIL_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("GMAIL_REDIRECT_URI", "https://example.test/auth/google/callback")
+    monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    other = _personal_user(db, "2")
+    db.add(
+        GmailCredential(
+            user_id=other.id,
+            account_email="other@example.test",
+            encrypted_token="other-encrypted-token",
+            scopes=GMAIL_SCOPE,
+        )
+    )
+    state = "one-time-state"
+    db.add(
+        GmailOAuthState(
+            state_hash=__import__("hashlib").sha256(state.encode()).hexdigest(),
+            expires_at=utcnow() + timedelta(minutes=5),
+        )
+    )
+    db.commit()
+
+    user, credential = complete_oauth(db, state, "authorization-code", client=OAuthClient())
+
+    assert user.google_subject == "stable-google-subject"
+    assert credential.user_id == user.id
+    assert db.scalar(
+        select(GmailCredential).where(GmailCredential.user_id == other.id)
+    ).account_email == "other@example.test"

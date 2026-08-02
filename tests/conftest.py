@@ -8,7 +8,7 @@ from app.database import Base
 @pytest.fixture()
 def db(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv("LOCAL_DEMO_AUTH_ENABLED", "true")
+    monkeypatch.setenv("SESSION_SECRET", "test-session-secret-at-least-thirty-two-bytes")
     engine=create_engine("sqlite://",connect_args={"check_same_thread":False},poolclass=StaticPool)
     @event.listens_for(engine, "connect")
     def enable_foreign_keys(dbapi_connection, connection_record):

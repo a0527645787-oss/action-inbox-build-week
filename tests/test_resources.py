@@ -4,18 +4,28 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from app.analysis import analyze_email, fallback_analysis
+from app.auth import get_current_user
 from app.database import get_db
 from app.demo_data import load_demo_emails
 from app.main import app
-from app.models import BusinessResource, Email
+from app.models import BusinessResource, Email, User
 from app.openai_analysis import SYSTEM_PROMPT, build_input, validate_evidence
 from app.resources import seed_demo_resources, select_relevant_resources
 
 
 def test_resource_crud(db):
+    user = User(
+        id="80000000-0000-0000-0000-000000000008",
+        email="resources@example.test",
+        display_name="Resources",
+        google_subject="resources-google-subject",
+    )
+    db.add(user)
+    db.commit()
     def override_db():
         yield db
     app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_current_user] = lambda: user
     try:
         with TestClient(app) as client:
             created=client.post("/resources",data={"title":"Team procedure","resource_type":"procedure","content":"Use form A for vendor requests.","organization_team":"Operations","enabled":"true"})

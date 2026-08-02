@@ -18,8 +18,12 @@ def _client(db, user):
 
 
 def test_bulk_triage_analyzes_owned_inbox_and_is_idempotent(db):
-    emails = load_demo_emails(db)
-    user = db.get(User, emails[0].user_id)
+    user = User(id="40000000-0000-0000-0000-000000000004", email="triage@example.test", display_name="Triage")
+    db.add(user)
+    db.commit()
+    emails = [Email(**item, user_id=user.id, source="test") for item in DEMO_EMAILS]
+    db.add_all(emails)
+    db.commit()
     other = User(id="50000000-0000-0000-0000-000000000005", email="other-triage@example.test", display_name="Other")
     db.add(other)
     db.commit()
@@ -31,7 +35,7 @@ def test_bulk_triage_analyzes_owned_inbox_and_is_idempotent(db):
         with _client(db, user) as client:
             response = client.post("/api/inbox/analyze-all", follow_redirects=False)
             assert response.status_code == 303
-            assert response.headers["location"] == "/dashboard?emails_checked=5&tasks_created=3"
+            assert response.headers["location"] == "/dashboard?emails_checked=5&tasks_created=3&failures=0"
             assert db.scalar(select(func.count()).select_from(Analysis).where(Analysis.user_id == user.id)) == 5
             assert db.scalar(select(func.count()).select_from(Task).where(Task.user_id == user.id)) == 3
             assert other_email.analyzed is False
@@ -41,7 +45,7 @@ def test_bulk_triage_analyzes_owned_inbox_and_is_idempotent(db):
             assert db.scalar(select(func.count()).select_from(Task).where(Task.email_id.in_(non_actionable_ids))) == 0
 
             second = client.post("/api/inbox/analyze-all", follow_redirects=False)
-            assert second.headers["location"] == "/dashboard?emails_checked=0&tasks_created=0"
+            assert second.headers["location"] == "/dashboard?emails_checked=0&tasks_created=0&failures=0"
             assert db.scalar(select(func.count()).select_from(Analysis).where(Analysis.user_id == user.id)) == 5
             assert db.scalar(select(func.count()).select_from(Task).where(Task.user_id == user.id)) == 3
     finally:
@@ -49,8 +53,9 @@ def test_bulk_triage_analyzes_owned_inbox_and_is_idempotent(db):
 
 
 def test_bulk_triage_is_post_only(db):
-    emails = load_demo_emails(db)
-    user = db.get(User, emails[0].user_id)
+    user = User(id="40000000-0000-0000-0000-000000000014", email="post@example.test", display_name="Post")
+    db.add(user)
+    db.commit()
     try:
         with _client(db, user) as client:
             assert client.get("/api/inbox/analyze-all").status_code == 405
@@ -60,8 +65,12 @@ def test_bulk_triage_is_post_only(db):
 
 
 def test_single_email_analyze_and_reanalyze_still_work(db):
-    emails = load_demo_emails(db)
-    user = db.get(User, emails[0].user_id)
+    user = User(id="40000000-0000-0000-0000-000000000024", email="single@example.test", display_name="Single")
+    db.add(user)
+    db.commit()
+    emails = [Email(**item, user_id=user.id, source="test") for item in DEMO_EMAILS]
+    db.add_all(emails)
+    db.commit()
     invoice = next(email for email in emails if email.external_id == "demo-invoice")
     try:
         with _client(db, user) as client:

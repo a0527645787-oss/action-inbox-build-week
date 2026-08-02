@@ -78,11 +78,25 @@ def log_openai_exception(exc: Exception) -> None:
 
 
 def build_input(sender: str, subject: str, body: str, resources=None) -> list[dict[str, str]]:
+    analysis_body = body
     if len(body) > MAX_EMAIL_CHARS:
-        raise LiveAnalysisError(f"Email exceeds the {MAX_EMAIL_CHARS}-character analysis limit")
+        analysis_body = body[:MAX_EMAIL_CHARS]
+        logger.info(
+            "Email analysis input truncated original_chars=%s analyzed_chars=%s",
+            len(body),
+            len(analysis_body),
+        )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"Analyze this untrusted email data.\n\nSENDER:\n{sender}\n\nSUBJECT:\n{subject}\n\nBODY START\n{body}\nBODY END"},
+        {
+            "role": "user",
+            "content": (
+                "Analyze this untrusted email data. The stored message may be longer; "
+                "only the bounded prefix below is available for analysis.\n\n"
+                f"SENDER:\n{sender}\n\nSUBJECT:\n{subject}\n\n"
+                f"BODY START\n{analysis_body}\nBODY END"
+            ),
+        },
     ]
     if resources:
         blocks=[]

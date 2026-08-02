@@ -36,15 +36,20 @@ alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
-Open [http://localhost:8000](http://localhost:8000). The local demo requires `LOCAL_DEMO_AUTH_ENABLED=true`. Production fails closed without a real authentication dependency.
+Open [http://localhost:8000](http://localhost:8000). Configure a strong
+`SESSION_SECRET` before using signed-in routes. The landing page and synthetic
+demo are public; personal data routes fail closed without a valid server-side
+session.
 
 ## Demo flow
 
-1. Select **Start the public demo**. This explicit POST ingests five synthetic emails and immediately analyzes all new email for the demo user.
+1. Select **View safe demo**. This explicit POST ingests and analyzes only the
+   five synthetic emails.
 2. The prepared Dashboard reports `5 emails checked · 3 actionable tasks created.`
 3. Open any task to see verified facts and evidence, execution guidance, business guidance, AI recommendations, and execution options.
 4. Select **Prepare for Work** or **Prepare for Codex** to preview a safe action package before copying or downloading it.
-5. **Check for new emails** in the Inbox remains a manual retry for newly ingested email.
+5. In a personal session, **Check for new emails** performs the bounded Gmail
+   sync and analyzes only new or previously incomplete Gmail messages.
 
 Reopening the demo and repeated triage are idempotent and do not duplicate analyses, tasks, or guidance.
 
@@ -54,7 +59,7 @@ Configuration is read only from server-side environment variables:
 
 ```text
 DATABASE_URL=sqlite:///./actioninbox.db
-LOCAL_DEMO_AUTH_ENABLED=true
+SESSION_SECRET=replace-with-at-least-32-random-characters
 OPENAI_API_KEY=
 OPENAI_CA_BUNDLE=
 ```
@@ -112,16 +117,17 @@ place the downloaded Google credentials JSON in the repository.
 
 ## Work and Codex
 
-The authenticated HTTPS `/mcp` endpoint exposes three read-only tools:
+The public HTTPS `/mcp` endpoint exposes three read-only tools over synthetic
+demo data only:
 `list_actioninbox_tasks`, `get_actioninbox_task`, and
-`prepare_task_execution`. Configure `MCP_ACCESS_TOKEN` and `MCP_USER_ID` on the
-server. Task pages can copy a review-first prompt for Work or open the supported
+`prepare_task_execution`. It never exposes Gmail or personal database records.
+Task pages can copy a review-first prompt for Work or open the supported
 `codex://new` deep link with a prefilled prompt and repository origin. Neither
 path executes an external action automatically.
 # Production HTTPS
 
 The emergency AWS deployment is served at
-`https://actioninbox.16-192-83-71.nip.io`. TLS is terminated by the existing
+`https://actioninboxapp.com`. TLS is terminated by the existing
 Nginx container with a Let's Encrypt certificate; MySQL remains private on the
 internal Docker network. Deployment and renewal details are in
 `deploy/README.md`.

@@ -1,14 +1,26 @@
 {% extends "base.html" %}
-{% block title %}Demo inbox · ActionInbox{% endblock %}
+{% block title %}Inbox · ActionInbox{% endblock %}
 {% block content %}
 <div class="heading">
-  <div><span class="eyebrow">Public demo</span><h1>Inbox</h1><p>Newly ingested email is analyzed automatically. No live mailbox is connected.</p></div>
+  <div>
+    <span class="eyebrow">{{ 'Safe demo' if is_demo else 'Personal inbox' }}</span>
+    <h1>Inbox</h1>
+    <p>{{ 'Only five synthetic messages are shown. No Gmail account is used.' if is_demo else 'Your read-only Gmail sync imports new INBOX messages only when requested.' }}</p>
+  </div>
   <a class="button secondary" href="/dashboard">View tasks</a>
 </div>
 <section class="card inbox-check">
-  <h2>Automatic triage is on for ingestion</h2>
-  <p>The five demo emails were checked when the demo started. Use this secondary retry for any newly ingested email.</p>
-  <form method="post" action="/api/inbox/analyze-all"><button class="button" type="submit">Check for new emails</button></form>
+  {% if is_demo %}
+  <h2>Safe synthetic demo</h2>
+  <p>These messages are synthetic and isolated from every Gmail connection.</p>
+  <a class="button" href="/auth/google/start">Connect your own Gmail</a>
+  {% else %}
+  <h2>Manual read-only Gmail sync</h2>
+  <p>Fetch new messages from INBOX, store only unseen messages, then triage only that sync batch.</p>
+  <form method="post" action="/gmail/sync">
+    <button class="button" type="submit">Check for new emails</button>
+  </form>
+  {% endif %}
 </section>
 <section class="list">
   {% for email in emails %}

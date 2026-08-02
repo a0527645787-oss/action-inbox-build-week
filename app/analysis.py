@@ -176,7 +176,11 @@ def _evidence_backed_deadline_text(task, result: EmailAnalysisResult) -> str | N
 
 
 def _project_result(db: Session, email: Email, result: EmailAnalysisResult, source: str, error: str | None):
-    facts_by_evidence_id = {fact.evidence.id: fact for fact in result.email_facts}
+    facts_by_evidence_id = {
+        identifier: fact
+        for fact in result.email_facts
+        for identifier in (fact.id, fact.evidence.id)
+    }
     projected_task = result.tasks[0] if result.action_required and result.tasks else None
     evidence = None
     if projected_task:
@@ -215,6 +219,14 @@ def analyze_email(db: Session, email: Email, *, force: bool = False, client=None
     source = "demo_fallback"
     error = None
     resources=select_relevant_resources(db,email)
+    if email.source == "demo" and client is None:
+        return _project_result(
+            db,
+            email,
+            fallback_analysis(email, resources),
+            "demo_fallback",
+            None,
+        )
     if email.source == "gmail" and client is None and not os.getenv("OPENAI_API_KEY"):
         raise LiveAnalysisError("Live analysis is unavailable for this email")
     try:
