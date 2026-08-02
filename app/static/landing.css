@@ -1,0 +1,69 @@
+.landing-hero {
+  position: relative;
+  isolation: isolate;
+  max-width: none;
+  min-height: 590px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid rgba(23, 91, 69, .1);
+  border-radius: 30px;
+  padding: 72px clamp(28px, 7vw, 78px);
+  background: linear-gradient(135deg, rgba(255, 254, 250, .96), rgba(239, 247, 242, .92));
+  box-shadow: 0 24px 70px rgba(34, 55, 46, .1);
+}
+
+.landing-hero > *:not(.hero-glow) { position: relative; z-index: 1; }
+.landing-hero h1 { max-width: 850px; }
+.hero-lede { max-width: 735px !important; }
+.hero-actions { display: flex; align-items: stretch; gap: 18px; margin-top: 24px; flex-wrap: wrap; }
+.hero-actions form { display: flex; margin: 0; }
+.landing-cta {
+  min-width: 190px;
+  min-height: 56px;
+  justify-content: space-between;
+  align-items: center;
+  gap: 24px;
+  border-radius: 16px;
+  padding: 16px 20px;
+  box-shadow: 0 12px 28px rgba(23, 91, 69, .16);
+  transition: transform .25s ease, box-shadow .25s ease;
+}
+.landing-cta:hover { transform: translateY(-4px); box-shadow: 0 18px 36px rgba(23, 91, 69, .21); }
+.secondary.landing-cta { box-shadow: 0 12px 28px rgba(34, 55, 46, .08); }
+.primary-cta { animation: gentle-float 5s ease-in-out infinite; }
+.trust-line { font-size: 13px !important; font-weight: 650; letter-spacing: .015em; margin: 25px 0 0; color: #557067 !important; }
+.hero-glow { position: absolute; border-radius: 50%; filter: blur(4px); opacity: .62; z-index: -1; animation: drift 10s ease-in-out infinite; }
+.hero-glow-one { width: 310px; height: 310px; right: -80px; top: -90px; background: radial-gradient(circle, #bde5d3, transparent 68%); }
+.hero-glow-two { width: 250px; height: 250px; right: 18%; bottom: -140px; background: radial-gradient(circle, #f6df91, transparent 68%); animation-delay: -4s; }
+.landing-section { margin-top: 36px; padding: 54px; border: 1px solid var(--line); border-radius: 26px; background: rgba(255, 254, 250, .82); }
+.section-heading { display: grid; grid-template-columns: .55fr 1.45fr; gap: 28px; align-items: start; }
+.landing-section h2 { font-size: clamp(30px, 4vw, 48px); letter-spacing: -.045em; line-height: 1.08; margin: 0 0 30px; }
+.how-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+.how-card { min-height: 225px; padding: 25px; border: 1px solid var(--line); border-radius: 18px; background: var(--card); box-shadow: 0 12px 30px rgba(34, 55, 46, .06); transition: transform .25s ease, border-color .25s ease; }
+.how-card:hover { transform: translateY(-5px); border-color: #b7cfc3; }
+.how-card h3 { font-size: 21px; margin: 22px 0 10px; }
+.how-card p, .use-panel p { color: var(--muted); line-height: 1.65; margin: 0; }
+.step-number { display: inline-grid; place-items: center; width: 42px; height: 42px; border-radius: 13px; background: var(--mint); color: var(--green); font-size: 13px; font-weight: 850; }
+.use-panel { display: grid; grid-template-columns: .8fr 1.2fr; gap: 50px; align-items: center; background: var(--ink); color: white; border-color: var(--ink); }
+.use-panel .eyebrow { color: #92d6ba; }
+.use-panel h2 { margin: 12px 0 0; }
+.use-panel p { font-size: 18px; color: #d8dfdb; }
+.use-panel strong { color: white; }
+
+@keyframes gentle-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+@keyframes drift { 0%, 100% { transform: translate(0, 0) scale(1); } 50% { transform: translate(-22px, 16px) scale(1.08); } }
+@media (prefers-reduced-motion: reduce) {
+  .primary-cta, .hero-glow { animation: none; }
+  .landing-cta, .how-card { transition: none; }
+}
+@media (max-width: 760px) {
+  .how-grid, .section-heading, .use-panel { grid-template-columns: 1fr; }
+  .landing-hero { min-height: auto; padding: 48px 24px; border-radius: 22px; }
+  .landing-hero h1 { font-size: clamp(43px, 13vw, 62px); }
+  .hero-actions { display: grid; grid-template-columns: 1fr; gap: 13px; }
+  .hero-actions form, .landing-cta { width: 100%; }
+  .landing-section { padding: 34px 23px; }
+  .use-panel { gap: 18px; }
+}

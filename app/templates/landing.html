@@ -1,16 +1,65 @@
 {% extends "base.html" %}
-{% block title %}ActionInbox · Evidence-backed action{% endblock %}
+{% block title %}ActionInbox - Evidence-backed action{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/static/landing.css">{% endblock %}
 {% block content %}
-<section class="hero">
+<section class="hero landing-hero">
+  <div class="hero-glow hero-glow-one" aria-hidden="true"></div>
+  <div class="hero-glow hero-glow-two" aria-hidden="true"></div>
   <span class="eyebrow">OpenAI Build Week 2026</span>
-  <h1>Turn email into clear, evidence-backed work.</h1>
-  <p>ActionInbox finds the task, proves where it came from, and keeps each connected inbox isolated in its own session.</p>
+  <h1>Your inbox, translated into action.</h1>
+  <p class="hero-lede">
+    ActionInbox reads a small, recent slice of your inbox, identifies supported
+    requests, and turns them into clear tasks backed by exact quotes from the
+    original email.
+  </p>
   {% if demo_error %}<p class="notice">The safe demo could not be prepared. Please try again.</p>{% endif %}
   <div class="hero-actions">
-    <a class="button" href="/auth/google/start">Connect Gmail</a>
+    <a class="button landing-cta primary-cta" href="/auth/google/start">
+      <span>Connect Gmail</span><span aria-hidden="true">→</span>
+    </a>
     <form method="post" action="/demo">
-      <button class="button secondary" type="submit">View safe demo</button>
+      <button class="button secondary landing-cta" type="submit">
+        <span>View safe demo</span><span aria-hidden="true">↗</span>
+      </button>
     </form>
   </div>
+  <p class="trust-line">Read-only Gmail access · Manual sync · Exact evidence · Separate private sessions</p>
+</section>
+
+<section class="landing-section" aria-labelledby="how-title">
+  <div class="section-heading">
+    <span class="eyebrow">How it works</span>
+    <h2 id="how-title">From message to next step—in three clear stages.</h2>
+  </div>
+  <div class="how-grid">
+    <article class="how-card">
+      <span class="step-number">01</span>
+      <h3>Connect or explore</h3>
+      <p>Connect your own Gmail with read-only access, or use five fully synthetic emails in the safe demo.</p>
+    </article>
+    <article class="how-card">
+      <span class="step-number">02</span>
+      <h3>Check new mail</h3>
+      <p>You start every sync. ActionInbox checks only recent Inbox messages and never sends, labels, archives, or deletes.</p>
+    </article>
+    <article class="how-card">
+      <span class="step-number">03</span>
+      <h3>Review with evidence</h3>
+      <p>Open a task to see the summary, deadline, exact source quote, business guidance, and clearly separated AI suggestions.</p>
+    </article>
+  </div>
+</section>
+
+<section class="landing-section use-panel" aria-labelledby="use-title">
+  <div>
+    <span class="eyebrow">Using ActionInbox</span>
+    <h2 id="use-title">Stay in control at every step.</h2>
+  </div>
+  <p>
+    Start with <strong>Check for new emails</strong>, review the tasks that were
+    created, then open any task to verify its supporting evidence. ActionInbox
+    prepares guidance—it does not send email or execute an external action
+    without your explicit review.
+  </p>
 </section>
 {% endblock %}
