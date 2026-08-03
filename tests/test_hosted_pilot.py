@@ -111,10 +111,22 @@ def test_empty_sqlite_database_migrates_to_head(tmp_path, monkeypatch):
     from sqlalchemy import create_engine
     migrated = create_engine(f"sqlite:///{path}")
     inspector = inspect(migrated)
-    assert {"users", "emails", "analyses", "tasks", "business_resources", "gmail_credentials"} <= set(inspector.get_table_names())
+    assert {
+        "users",
+        "emails",
+        "analyses",
+        "tasks",
+        "business_resources",
+        "gmail_credentials",
+        "executions",
+        "execution_events",
+    } <= set(inspector.get_table_names())
     assert "user_id" in {column["name"] for column in inspector.get_columns("emails")}
     for table in ("emails", "analyses", "tasks", "business_resources", "gmail_credentials"):
         assert "user_id" in {column["name"] for column in inspector.get_columns(table)}
+    assert {"completed_at", "completed_by"} <= {
+        column["name"] for column in inspector.get_columns("tasks")
+    }
     command.check(config)
 
 

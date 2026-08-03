@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 import hashlib
 import logging
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -27,7 +28,16 @@ from .auth import (
 )
 from .database import get_db
 from .demo_data import ingest_demo_emails
-from .execution import PACKAGE_EXECUTORS, build_execution_package, build_review_prompt, codex_deep_link, package_as_text, parse_structured_result
+from .agent_execution import (
+    CANCELLABLE_STATUSES,
+    TERMINAL_STATUSES,
+    approval_token,
+    approve_execution,
+    cancel_execution,
+    create_execution,
+    serialize_execution,
+)
+from .execution import PACKAGE_EXECUTORS, build_execution_package, package_as_text, parse_structured_result
 from .gmail import (
     GMAIL_MESSAGE_LIMIT,
     GMAIL_QUERY,
@@ -42,7 +52,7 @@ from .gmail import (
     sync_gmail,
 )
 from .mcp import handle_mcp
-from .models import BusinessResource, Email, GmailCredential, Task, User
+from .models import BusinessResource, Email, Execution, ExecutionEvent, GmailCredential, Task, User, utcnow
 from .resources import MAX_RESOURCE_CHARS, RESOURCE_TYPES, seed_demo_resources
 from .triage import triage_unanalyzed_emails
 
@@ -300,7 +310,7 @@ def dashboard(request: Request, emails_checked: int = 0, tasks_created: int = 0,
     query = (
         select(Task)
         .options(joinedload(Task.email).joinedload(Email.analysis))
-        .where(Task.user_id == current_user.id)
+        .where(Task.user_id == current_user.id, Task.completed_at.is_(None))
     )
     if current_user.id == DEMO_USER_ID:
         query = query.join(Task.email).where(Email.source == "demo")
@@ -312,6 +322,11 @@ def dashboard(request: Request, emails_checked: int = 0, tasks_created: int = 0,
         "failures": max(failures, 0),
         "current_user": current_user,
         "is_demo": current_user.id == DEMO_USER_ID,
+        "completed_count": db.scalar(
+            select(Task.id)
+            .where(Task.user_id == current_user.id, Task.completed_at.is_not(None))
+            .limit(1)
+        ) is not None,
     })
 
 
@@ -356,9 +371,189 @@ def task_detail(task_id: int, request: Request, db: Session = Depends(get_db), c
         if not isinstance(start, int) or not isinstance(end, int) or resource.content[start:end] != quote:
             continue
         guidance_views.append({"guidance": guidance, "resource": resource, "before": resource.content[:start], "quote": quote, "after": resource.content[end:]})
-    work_prompt = build_review_prompt(task, result, "CHATGPT_WORK") if result.execution_guidance else None
-    codex_url = codex_deep_link(task, result) if result.execution_guidance else None
-    return templates.TemplateResponse(request, "task.html", {"task": task, "before": before, "evidence": evidence, "after": after, "guidance_views": guidance_views, "result": result, "execution": result.execution_guidance, "work_prompt": work_prompt, "codex_url": codex_url, "current_user": current_user})
+    executions = db.scalars(
+        select(Execution)
+        .where(Execution.task_id == task.id, Execution.user_id == current_user.id)
+        .order_by(Execution.id.desc())
+    ).all()
+    return templates.TemplateResponse(request, "task.html", {
+        "task": task,
+        "before": before,
+        "evidence": evidence,
+        "after": after,
+        "guidance_views": guidance_views,
+        "result": result,
+        "execution": result.execution_guidance,
+        "executions": executions,
+        "execution_idempotency_key": str(uuid4()),
+        "current_user": current_user,
+    })
+
+
+@app.post("/tasks/{task_id}/complete")
+def complete_task(
+    task_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    task = _owned_task(db, task_id, current_user.id)
+    if task.completed_at is None:
+        task.completed_at = utcnow()
+        task.completed_by = current_user.id
+        db.commit()
+    return RedirectResponse(f"/tasks/{task.id}", 303)
+
+
+@app.post("/tasks/{task_id}/reopen")
+def reopen_task(
+    task_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    task = _owned_task(db, task_id, current_user.id)
+    if task.completed_at is not None:
+        task.completed_at = None
+        task.completed_by = None
+        db.commit()
+    return RedirectResponse(f"/tasks/{task.id}", 303)
+
+
+@app.get("/completed")
+def completed_tasks(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    query = (
+        select(Task)
+        .options(joinedload(Task.email).joinedload(Email.analysis))
+        .where(Task.user_id == current_user.id, Task.completed_at.is_not(None))
+    )
+    if current_user.id == DEMO_USER_ID:
+        query = query.join(Task.email).where(Email.source == "demo")
+    tasks = db.scalars(query.order_by(Task.completed_at.desc())).all()
+    return templates.TemplateResponse(
+        request,
+        "completed.html",
+        {"tasks": tasks, "current_user": current_user},
+    )
+
+
+def _owned_execution(db: Session, execution_id: int, user_id: str) -> Execution:
+    execution = db.scalar(
+        select(Execution)
+        .options(joinedload(Execution.task))
+        .where(Execution.id == execution_id, Execution.user_id == user_id)
+    )
+    if execution is None:
+        raise HTTPException(404, "Execution not found")
+    return execution
+
+
+@app.post("/tasks/{task_id}/execution-plan")
+def execution_plan(
+    task_id: int,
+    idempotency_key: str = Form(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    task = _owned_task(db, task_id, current_user.id)
+    key = idempotency_key.strip()
+    if not key or len(key) > 100:
+        raise HTTPException(422, "Invalid idempotency key")
+    execution = create_execution(db, task, key)
+    return RedirectResponse(f"/executions/{execution.id}", 303)
+
+
+@app.get("/executions/{execution_id}")
+def execution_review(
+    execution_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    execution = _owned_execution(db, execution_id, current_user.id)
+    return templates.TemplateResponse(request, "execution.html", {
+        "execution_record": execution,
+        "execution_data": serialize_execution(execution),
+        "approval_token": approval_token(execution) if execution.status == "awaiting_approval" else None,
+        "can_cancel": execution.status in CANCELLABLE_STATUSES,
+        "terminal": execution.status in TERMINAL_STATUSES,
+        "current_user": current_user,
+    })
+
+
+@app.post("/executions/{execution_id}/approve")
+def execution_approve(
+    execution_id: int,
+    plan_hash: str = Form(...),
+    approval: str = Form(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    execution = _owned_execution(db, execution_id, current_user.id)
+    try:
+        approve_execution(db, execution, plan_hash, approval)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return RedirectResponse(f"/executions/{execution.id}", 303)
+
+
+@app.post("/executions/{execution_id}/cancel")
+def execution_cancel(
+    execution_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    execution = _owned_execution(db, execution_id, current_user.id)
+    try:
+        cancel_execution(db, execution)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return RedirectResponse(f"/executions/{execution.id}", 303)
+
+
+@app.get("/executions/{execution_id}/status")
+def execution_status(
+    execution_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return JSONResponse(serialize_execution(_owned_execution(db, execution_id, current_user.id)))
+
+
+@app.get("/executions/{execution_id}/events")
+def execution_events(
+    execution_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    execution = _owned_execution(db, execution_id, current_user.id)
+    return JSONResponse({
+        "execution_id": execution.id,
+        "events": [
+            {
+                "id": event.id,
+                "event_type": event.event_type,
+                "status": event.status,
+                "message": event.message,
+                "created_at": event.created_at.isoformat(),
+            }
+            for event in execution.events
+        ],
+    })
+
+
+@app.get("/executions/{execution_id}/result")
+def execution_result(
+    execution_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    execution = _owned_execution(db, execution_id, current_user.id)
+    if execution.status not in TERMINAL_STATUSES:
+        raise HTTPException(409, "Execution is not complete")
+    return JSONResponse(serialize_execution(execution))
 
 
 @app.get("/tasks/{task_id}/execution-package", response_class=HTMLResponse)

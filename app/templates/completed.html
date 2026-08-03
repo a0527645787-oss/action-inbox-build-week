@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Completed Tasks · ActionInbox{% endblock %}
+{% block content %}
+<div class="heading">
+  <div><span class="eyebrow">Completed tasks</span><h1>Completed</h1><p>Completion changes dashboard state only; evidence and execution history remain intact.</p></div>
+  <a class="button secondary" href="/dashboard">Active tasks</a>
+</div>
+{% if tasks %}
+<section class="task-grid">
+{% for task in tasks %}
+  <article class="card task-card">
+    <span class="badge done">Completed</span>
+    <h2><a href="/tasks/{{ task.id }}">{{ task.title }}</a></h2>
+    <p>Completed {{ task.completed_at }}</p>
+    <form method="post" action="/tasks/{{ task.id }}/reopen"><button class="button secondary" type="submit">Restore to active</button></form>
+  </article>
+{% endfor %}
+</section>
+{% else %}
+<section class="empty"><h2>No completed tasks</h2><p>Completed tasks will appear here without losing their source evidence or execution history.</p></section>
+{% endif %}
+{% endblock %}

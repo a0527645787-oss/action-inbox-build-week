@@ -82,7 +82,53 @@ class Task(Base):
     title: Mapped[str] = mapped_column(String(255))
     deadline: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     deadline_text: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
     email: Mapped[Email] = relationship(back_populates="task")
+    executions: Mapped[list["Execution"]] = relationship(back_populates="task", cascade="all, delete-orphan")
+
+
+class Execution(Base):
+    __tablename__ = "executions"
+    __table_args__ = (
+        UniqueConstraint("user_id", "idempotency_key", name="uq_executions_user_idempotency"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="awaiting_approval", index=True)
+    plan: Mapped[str] = mapped_column(Text)
+    plan_hash: Mapped[str] = mapped_column(String(64))
+    tool_name: Mapped[str] = mapped_column(String(100))
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    task: Mapped[Task] = relationship(back_populates="executions")
+    events: Mapped[list["ExecutionEvent"]] = relationship(
+        back_populates="execution",
+        cascade="all, delete-orphan",
+        order_by="ExecutionEvent.id",
+    )
+
+
+class ExecutionEvent(Base):
+    __tablename__ = "execution_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    execution_id: Mapped[int] = mapped_column(ForeignKey("executions.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    event_type: Mapped[str] = mapped_column(String(50))
+    status: Mapped[str] = mapped_column(String(30))
+    message: Mapped[str] = mapped_column(Text)
+    safe_metadata: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    execution: Mapped[Execution] = relationship(back_populates="events")
 
 
 class BusinessResource(Base):

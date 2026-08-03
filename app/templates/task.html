@@ -2,7 +2,7 @@
 {% block title %}{{ task.title }} · ActionInbox{% endblock %}
 {% block content %}
 <a class="back" href="/dashboard">← Dashboard</a>
-<div class="detail-head"><div><div class="badge-row"><span class="badge">{{ task.email.analysis.classification|replace('_',' ') }}</span><span class="badge source">{{ 'Live GPT-5.6' if task.email.analysis.source == 'live_gpt' else 'Demo fallback' }}</span></div><h1>{{ task.title }}</h1><form method="post" action="/api/emails/{{ task.email.id }}/reanalyze"><button class="text-button" type="submit">Re-analyze email</button></form></div><div class="deadline"><span>Deadline</span><strong>{{ task.deadline_text or 'No deadline' }}</strong></div></div>
+<div class="detail-head"><div><div class="badge-row"><span class="badge">{{ task.email.analysis.classification|replace('_',' ') }}</span><span class="badge source">{{ 'Live GPT-5.6' if task.email.analysis.source == 'live_gpt' else 'Demo fallback' }}</span>{% if task.completed_at %}<span class="badge done">Completed</span>{% endif %}</div><h1>{{ task.title }}</h1><div class="actions"><form method="post" action="/api/emails/{{ task.email.id }}/reanalyze"><button class="text-button" type="submit">Re-analyze email</button></form>{% if task.completed_at %}<form method="post" action="/tasks/{{ task.id }}/reopen"><button class="button secondary" type="submit">Restore to active</button></form>{% else %}<form method="post" action="/tasks/{{ task.id }}/complete"><button class="button secondary" type="submit">Mark as completed</button></form>{% endif %}</div>{% if task.completed_at %}<p class="muted">Completed {{ task.completed_at }} by the current signed-in user.</p>{% endif %}</div><div class="deadline"><span>Deadline</span><strong>{{ task.deadline_text or 'No deadline' }}</strong></div></div>
 <section class="card section-stack"><span class="eyebrow">1 · What needs to be done</span><h2>{{ task.title }}</h2><p>{{ task.email.analysis.summary }}</p>{% if execution %}<p><strong>Successful outcome:</strong> {{ execution.outcome.text }} <span class="source-label {{ execution.outcome.source|lower }}">{{ execution.outcome.source|replace('_',' ') }}</span></p>{% endif %}</section>
 <section class="card section-stack"><span class="eyebrow">2 · Verified facts and evidence</span>{% for fact in result.email_facts %}<div class="fact-row"><div><span class="source-label email_fact">Email fact</span><strong>{{ fact.type|replace('_',' ')|title }}: {{ fact.value }}</strong></div><blockquote>“{{ fact.evidence.exact_quote }}”</blockquote><small>Exact email evidence · characters {{ fact.evidence.start_offset }}–{{ fact.evidence.end_offset }}</small></div>{% endfor %}<details><summary>Show original email with highlighted evidence</summary><h3>{{ task.email.subject }}</h3><p class="muted">From {{ task.email.sender }}</p><div class="email-body">{{ before }}<mark id="evidence">{{ evidence }}</mark>{{ after }}</div></details></section>
 {% if execution %}
@@ -11,6 +11,23 @@
 {% endif %}
 <section class="card section-stack"><span class="eyebrow">5 · Business guidance</span>{% if guidance_views %}{% for item in guidance_views %}<div class="guidance-block"><h3>{{ item.guidance.resource_title }}</h3><p>{{ item.guidance.instruction }} <span class="source-label business_guidance">Business guidance</span></p><div class="resource-evidence">{{ item.before }}<mark>{{ item.quote }}</mark>{{ item.after }}</div><small>Exact resource quote · characters {{ item.guidance.resource_evidence.start_offset }}–{{ item.guidance.resource_evidence.end_offset }}</small></div>{% endfor %}{% else %}<p>No relevant enabled business resource was found.</p>{% endif %}</section>
 <section class="card suggestion section-stack"><span class="eyebrow">6 · AI recommendations · not stated in the email or resource</span>{% for suggestion in result.ai_suggestions %}<p>{{ suggestion.text }} <span class="source-label ai_recommendation">AI recommendation</span></p>{% endfor %}</section>
-{% if execution %}<section class="card section-stack"><span class="eyebrow">7 · Execution options</span><div class="routing"><div><small>Recommended executor</small><strong>{{ execution.recommended_executor|replace('_',' ') }}</strong></div><div><small>Readiness</small><strong>{{ execution.readiness|replace('_',' ') }}</strong></div></div><p>{{ execution.executor_explanation }} <span class="source-label ai_recommendation">AI recommendation</span></p><h3>Proposed deliverable</h3><p>{{ execution.proposed_deliverable.text }}</p><div class="notice"><strong>Preview first.</strong> ActionInbox does not send, run, deploy, create events, or invoke external services. Any future execution requires preview → explicit approval → supported integration → verified result → audit record.</div><div class="actions"><a class="button" href="/tasks/{{ task.id }}/execution-package?executor=CHATGPT_WORK">Prepare for Work</a><a class="button secondary" href="/tasks/{{ task.id }}/execution-package?executor=CODEX">Prepare for Codex</a></div></section>{% endif %}
-{% if execution %}<section class="card section-stack handoff-card"><span class="eyebrow">Review-first handoff</span><h2>Continue in Work or Codex</h2><p>Nothing is executed automatically. Review the prepared prompt, then explicitly send or approve it.</p><div class="actions"><button class="button" type="button" data-copy-target="work-prompt">Copy for Work</button><a class="button secondary" href="{{ codex_url }}">Open in Codex</a></div><textarea id="work-prompt" class="package-text" readonly>{{ work_prompt }}</textarea></section>{% endif %}
+{% if execution %}
+<section class="card section-stack">
+  <span class="eyebrow">7 · ActionInbox Agent</span>
+  <h2>Review first, then approve once</h2>
+  <p>The first click only creates a frozen plan. It does not perform an external action.</p>
+  <form method="post" action="/tasks/{{ task.id }}/execution-plan">
+    <input type="hidden" name="idempotency_key" value="{{ execution_idempotency_key }}">
+    <button class="button" type="submit">Execute with ActionInbox Agent</button>
+  </form>
+  {% if executions %}
+  <h3>Execution history</h3>
+  <ul class="execution-history">
+    {% for item in executions %}
+    <li><a href="/executions/{{ item.id }}">Execution #{{ item.id }}</a> <span class="badge {{ 'done' if item.status == 'succeeded' else '' }}">{{ item.status|replace('_',' ') }}</span></li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endif %}
 {% endblock %}

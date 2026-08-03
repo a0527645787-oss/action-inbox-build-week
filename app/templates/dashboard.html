@@ -10,7 +10,7 @@
     <p class="result-banner"><strong>{{ emails_checked }} emails checked · {{ tasks_created }} actionable tasks created{% if failures %} · {{ failures }} messages need a safe retry{% endif %}.</strong></p>
     {% endif %}
   </div>
-  <a class="button secondary" href="/inbox">View inbox</a>
+  <div class="actions"><a class="button secondary" href="/inbox">View inbox</a>{% if completed_count %}<a class="button secondary" href="/completed">Completed tasks</a>{% endif %}</div>
 </div>
 {% if tasks %}
 <section class="task-grid">

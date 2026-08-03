@@ -46,6 +46,21 @@ services:
       retries: 12
       start_period: 20s
 
+  execution-worker:
+    build:
+      context: ..
+    command: ["python", "-m", "app.execution_worker"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: mysql+pymysql://${MYSQL_USER:?MYSQL_USER is required}:${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}@mysql:3306/${MYSQL_DATABASE:?MYSQL_DATABASE is required}?charset=utf8mb4
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY is required}
+    depends_on:
+      actioninbox:
+        condition: service_healthy
+    networks:
+      - backend
+
   nginx:
     image: nginx:1.27-alpine
     restart: unless-stopped
