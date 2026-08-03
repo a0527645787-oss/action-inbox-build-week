@@ -21,12 +21,7 @@
 </head>
 <body>
 <header>
-  <a class="brand" href="/">
-    <img class="brand-logo"
-         src="{{ url_for('static', path='images/branding/actioninbox-logo-512.png') }}"
-         alt="ActionInbox">
-    <span>ActionInbox</span>
-  </a>
+  <a class="brand" href="/">ActionInbox</a>
   {% if current_user %}
   <nav>
     <a href="/inbox">Inbox</a>

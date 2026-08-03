@@ -69,13 +69,13 @@ def test_branding_assets_are_linked_and_served(db):
         with _client(db) as client:
             landing = client.get("/")
             assert landing.status_code == 200
-            assert 'alt="ActionInbox"' in landing.text
+            assert "brand-logo" not in landing.text
+            assert "actioninbox-logo-512.png" not in landing.text
 
             assets = (
                 ("/static/images/branding/favicon.ico", "image/"),
                 ("/static/images/branding/favicon-32.png", "image/png"),
                 ("/static/images/branding/actioninbox-icon-192.png", "image/png"),
-                ("/static/images/branding/actioninbox-logo-512.png", "image/png"),
             )
             for path, content_type in assets:
                 assert path in landing.text
