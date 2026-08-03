@@ -64,6 +64,29 @@ def test_anonymous_browser_sees_only_public_landing_and_private_routes_redirect(
         app.dependency_overrides.clear()
 
 
+def test_branding_assets_are_linked_and_served(db):
+    try:
+        with _client(db) as client:
+            landing = client.get("/")
+            assert landing.status_code == 200
+            assert 'alt="ActionInbox"' in landing.text
+
+            assets = (
+                ("/static/images/branding/favicon.ico", "image/"),
+                ("/static/images/branding/favicon-32.png", "image/png"),
+                ("/static/images/branding/actioninbox-icon-192.png", "image/png"),
+                ("/static/images/branding/actioninbox-logo-512.png", "image/png"),
+            )
+            for path, content_type in assets:
+                assert path in landing.text
+                response = client.get(path)
+                assert response.status_code == 200
+                assert response.headers["content-type"].startswith(content_type)
+                assert response.content
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_safe_demo_exposes_only_synthetic_records_and_never_gmail(db):
     demo = ensure_demo_user(db)
     private = Email(

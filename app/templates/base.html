@@ -4,6 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{% block title %}ActionInbox{% endblock %}</title>
+  <link rel="icon"
+        href="{{ url_for('static', path='images/branding/favicon.ico') }}"
+        sizes="any">
+  <link rel="icon"
+        type="image/png"
+        sizes="32x32"
+        href="{{ url_for('static', path='images/branding/favicon-32.png') }}">
+  <link rel="apple-touch-icon"
+        sizes="192x192"
+        href="{{ url_for('static', path='images/branding/actioninbox-icon-192.png') }}">
   <link rel="stylesheet" href="/static/style.css">
   <link rel="stylesheet" href="/static/execution.css">
   <link rel="stylesheet" href="/static/integrations.css">
@@ -11,7 +21,12 @@
 </head>
 <body>
 <header>
-  <a class="brand" href="/">ActionInbox</a>
+  <a class="brand" href="/">
+    <img class="brand-logo"
+         src="{{ url_for('static', path='images/branding/actioninbox-logo-512.png') }}"
+         alt="ActionInbox">
+    <span>ActionInbox</span>
+  </a>
   {% if current_user %}
   <nav>
     <a href="/inbox">Inbox</a>
