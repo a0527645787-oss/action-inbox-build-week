@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class StrictModel(BaseModel):
@@ -77,10 +77,16 @@ class ExecutionGuidanceResult(StrictModel):
 
 
 class EmailAnalysisResult(StrictModel):
-    primary_classification: Literal["action_required", "informational", "newsletter_noise", "invoice", "meeting"]
-    action_required: bool
+    primary_classification: Literal["action_required", "informational", "newsletter_noise", "invoice", "meeting"] = Field(
+        description="If action_required, action_required must be true and tasks must contain at least one fully evidence-backed task."
+    )
+    action_required: bool = Field(
+        description="True exactly when at least one task is returned; every returned task requires this to be true."
+    )
     summary: str
-    tasks: list[TaskResult]
+    tasks: list[TaskResult] = Field(
+        description="Complete evidence-backed tasks. Conditional checks remain tasks and must preserve the condition in their wording."
+    )
     email_facts: list[EmailFactResult]
     resource_guidance: list[ResourceGuidanceResult]
     ai_suggestions: list[AISuggestionResult]

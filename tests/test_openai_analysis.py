@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import func, select
 
-from app.analysis import analyze_email
+from app.analysis import analyze_email, fallback_analysis
 from app.demo_data import load_demo_emails
 from app.models import Email, Task
 from app.openai_analysis import MAX_EMAIL_CHARS, LiveAnalysisError, SYSTEM_PROMPT, _build_ssl_context, build_input, log_openai_exception, request_live_analysis, validate_evidence
@@ -15,12 +15,15 @@ class FakeResponses:
         self.output = output
         self.error = error
         self.kwargs = None
+        self.calls = []
 
     def parse(self, **kwargs):
         self.kwargs = kwargs
+        self.calls.append(kwargs)
         if self.error:
             raise self.error
-        return SimpleNamespace(output_parsed=self.output)
+        output = self.output.pop(0) if isinstance(self.output, list) else self.output
+        return SimpleNamespace(output_parsed=output)
 
 
 class FakeClient:
@@ -91,11 +94,106 @@ def test_missing_evidence_rejects_fact_and_task(caplog):
     result = result_for(body)
     result.email_facts[0].evidence.start_offset = 1
     with caplog.at_level("WARNING", logger="actioninbox.openai"):
-        with pytest.raises(LiveAnalysisError, match="semantically inconsistent"):
+        with pytest.raises(LiveAnalysisError, match="local validation"):
             validate_evidence(result, body)
     assert "task_id=task" in caplog.text
     assert "reason=unknown_or_rejected_evidence_id" in caplog.text
     assert body not in caplog.text
+
+
+def test_repair_is_bounded_and_uses_only_safe_diagnostics(caplog):
+    body = "Approve USD 50 by July 21, 2026."
+    invalid = result_for(body)
+    invalid.tasks[0].evidence_ids = ["unknown"]
+    repaired = result_for(body)
+    email = SimpleNamespace(sender="sender@example.test", subject="Synthetic", body=body)
+    client = FakeClient([invalid, repaired])
+
+    with caplog.at_level("WARNING", logger="actioninbox.openai"):
+        result = request_live_analysis(email, client=client)
+
+    assert result.tasks[0].title == "Approve payment"
+    assert len(client.responses.calls) == 2
+    repair_input = client.responses.calls[1]["input"]
+    assert repair_input[:-1] == client.responses.calls[0]["input"]
+    repair_text = repair_input[-1]["content"]
+    assert "UNKNOWN_EVIDENCE_ID" in repair_text
+    assert "complete replacement" in repair_text
+    assert "Approve payment" not in repair_text
+    assert "UNKNOWN_EVIDENCE_ID" in caplog.text
+    assert "total_tasks=1 valid_tasks=0" in caplog.text
+    assert body not in caplog.text
+    assert repr(invalid.model_dump()) not in caplog.text
+
+
+def test_invalid_repair_makes_no_third_call():
+    body = "Approve USD 50 by July 21, 2026."
+    invalid = result_for(body)
+    invalid.tasks[0].evidence_ids = ["unknown"]
+    client = FakeClient([invalid, invalid, result_for(body)])
+    email = SimpleNamespace(sender="sender@example.test", subject="Synthetic", body=body)
+
+    with pytest.raises(LiveAnalysisError, match="local validation"):
+        request_live_analysis(email, client=client)
+
+    assert len(client.responses.calls) == 2
+
+
+def test_repair_removes_unsupported_deadline():
+    body = "Review whether the integration is affected."
+    quote = body
+    fact = {"id":"condition","type":"other","value":quote,"normalized_value":None,"confidence":"high","uncertainty":None,"evidence":{"id":"ev-condition","exact_quote":quote,"start_offset":0,"end_offset":len(quote)}}
+    base = {
+        "primary_classification":"action_required","action_required":True,"summary":"A conditional review is needed.",
+        "email_facts":[fact],"resource_guidance":[],"ai_suggestions":[],"missing_information":[],"execution_guidance":None,
+    }
+    invalid = EmailAnalysisResult.model_validate({**base, "tasks":[{"id":"task","title":"Review the integration by tomorrow","due_at":"2026-08-15T00:00:00","due_text":"tomorrow","uncertainty":None,"evidence_ids":["ev-condition"]}]})
+    repaired = EmailAnalysisResult.model_validate({**base, "tasks":[{"id":"task","title":"Check whether the integration is affected","due_at":None,"due_text":None,"uncertainty":"Whether it is affected is unknown.","evidence_ids":["ev-condition"]}]})
+    client = FakeClient([invalid, repaired])
+    email = SimpleNamespace(sender="sender@example.test", subject="Synthetic", body=body)
+
+    result = request_live_analysis(email, client=client)
+
+    assert len(client.responses.calls) == 2
+    assert result.tasks[0].due_at is None
+    assert result.tasks[0].due_text is None
+    assert "DEADLINE_WITHOUT_DEADLINE_EVIDENCE" in client.responses.calls[1]["input"][-1]["content"]
+
+
+@pytest.mark.parametrize("error", [TimeoutError("timeout"), RuntimeError("provider failure")])
+def test_provider_failures_are_not_repaired(error):
+    body = "Approve USD 50 by July 21, 2026."
+    client = FakeClient(error=error)
+    email = SimpleNamespace(sender="sender@example.test", subject="Synthetic", body=body)
+    with pytest.raises(LiveAnalysisError, match="OpenAI analysis failed"):
+        request_live_analysis(email, client=client)
+    assert len(client.responses.calls) == 1
+
+
+def test_malformed_schema_is_not_repaired():
+    body = "Approve USD 50 by July 21, 2026."
+    client = FakeClient({"not": "the schema"})
+    email = SimpleNamespace(sender="sender@example.test", subject="Synthetic", body=body)
+    with pytest.raises(Exception):
+        request_live_analysis(email, client=client)
+    assert len(client.responses.calls) == 1
+
+
+def test_database_failure_does_not_trigger_model_repair(db, monkeypatch):
+    load_demo_emails(db)
+    email = db.scalar(select(Email).where(Email.external_id == "demo-invoice"))
+    email.source = "test"
+    db.commit()
+    client = FakeClient(fallback_analysis(email))
+
+    def fail_commit():
+        raise RuntimeError("synthetic database failure")
+
+    monkeypatch.setattr(db, "commit", fail_commit)
+    with pytest.raises(RuntimeError, match="database failure"):
+        analyze_email(db, email, client=client)
+    assert len(client.responses.calls) == 1
+    db.rollback()
 
 
 def test_malformed_model_output_uses_demo_fallback(db):

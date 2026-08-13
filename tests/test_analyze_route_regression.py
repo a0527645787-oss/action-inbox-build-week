@@ -7,7 +7,7 @@ from app.auth import get_current_user
 from app.database import get_db
 from app.main import app
 from app.models import Analysis, Email, Task, User
-from app.openai_analysis import LiveAnalysisError, validate_evidence
+from app.openai_analysis import LiveAnalysisError, request_live_analysis, validate_evidence
 from app.schemas import EmailAnalysisResult
 
 
@@ -124,7 +124,7 @@ def test_aws_semantic_inconsistencies_are_rejected():
         try:
             validate_evidence(result, body)
         except LiveAnalysisError as exc:
-            assert str(exc) == "Structured analysis was semantically inconsistent"
+            assert str(exc) == "Structured analysis failed local validation"
         else:
             raise AssertionError("Inconsistent structured analysis was accepted")
 
@@ -134,6 +134,78 @@ def test_valid_conditional_aws_task_passes_semantic_validation():
     result = validate_evidence(_aws_result(body, action_required=True, tasks=[_aws_task()]), body)
     assert result.action_required is True
     assert [task.title for task in result.tasks] == [_aws_task()["title"]]
+    assert "if they do" in result.tasks[0].title
+    assert result.tasks[0].uncertainty
+
+
+class _SequenceResponses:
+    def __init__(self, outputs):
+        self.outputs = list(outputs)
+        self.calls = []
+
+    def parse(self, **kwargs):
+        self.calls.append(kwargs)
+        return type("Response", (), {"output_parsed": self.outputs.pop(0)})()
+
+
+class _SequenceClient:
+    def __init__(self, outputs):
+        self.responses = _SequenceResponses(outputs)
+
+
+def test_invalid_then_valid_repair_persists_exactly_one_pair(db):
+    user, email = _gmail_email(db)
+    body = "CloudTrail consumers may depend on the replaced Billing event names or sources."
+    email.body = body
+    db.commit()
+    invalid = _aws_result(body, action_required=True, tasks=[])
+    valid = _aws_result(body, action_required=True, tasks=[_aws_task()])
+    client = _SequenceClient([invalid, valid])
+
+    analysis = __import__("app.analysis", fromlist=["analyze_email"]).analyze_email(db, email, client=client)
+
+    assert len(client.responses.calls) == 2
+    assert analysis.action_required is True
+    assert db.scalar(select(func.count()).select_from(Analysis).where(Analysis.email_id == email.id)) == 1
+    assert db.scalar(select(func.count()).select_from(Task).where(Task.email_id == email.id)) == 1
+
+
+def test_failed_repair_reanalysis_restores_previous_analysis(db, monkeypatch):
+    user, email = _gmail_email(db)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-a-secret")
+    original = _successful_result(email.body)
+    monkeypatch.setattr("app.analysis.request_live_analysis", lambda *args, **kwargs: original)
+    from app.analysis import analyze_email
+    previous = analyze_email(db, email)
+    previous_task = db.scalar(select(Task).where(Task.email_id == email.id))
+    previous_analysis_id = previous.id
+    previous_task_id = previous_task.id
+
+    body = "CloudTrail consumers may depend on the replaced Billing event names or sources."
+    email.body = body
+    db.commit()
+    invalid = _aws_result(body, action_required=True, tasks=[])
+    repair_client = _SequenceClient([invalid, invalid])
+
+    def bounded_failure(target, **kwargs):
+        return request_live_analysis(target, client=repair_client)
+
+    monkeypatch.setattr("app.analysis.request_live_analysis", bounded_failure)
+    try:
+        with _client(db, user) as http:
+            response = http.post(f"/api/emails/{email.id}/reanalyze", follow_redirects=False)
+            assert response.status_code == 303
+            assert response.headers["location"] == f"/emails/{email.id}?analysis_error=1"
+            assert "could not be analyzed safely" in http.get(response.headers["location"]).text
+    finally:
+        app.dependency_overrides.clear()
+
+    assert len(repair_client.responses.calls) == 2
+    db.expire_all()
+    assert db.get(Analysis, previous_analysis_id) is not None
+    assert db.get(Task, previous_task_id) is not None
+    assert db.scalar(select(func.count()).select_from(Analysis).where(Analysis.email_id == email.id)) == 1
+    assert db.scalar(select(func.count()).select_from(Task).where(Task.email_id == email.id)) == 1
 
 
 def test_failed_analysis_keeps_gmail_message_and_returns_safe_error(db, monkeypatch):
