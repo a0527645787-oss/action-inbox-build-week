@@ -2,10 +2,33 @@ document.querySelectorAll('[data-jump]').forEach(button => button.addEventListen
   const target = document.getElementById(button.dataset.jump);
   if (target) { target.scrollIntoView({behavior: 'smooth', block: 'center'}); target.classList.add('pulse'); }
 }));
-document.querySelectorAll('form').forEach(form => form.addEventListener('submit', () => {
-  const button = form.querySelector('button');
-  if (button) { button.disabled = true; button.textContent = 'Working…'; }
+const resetSubmittedForms = () => document.querySelectorAll('form[data-submitting="true"]').forEach(form => {
+  const button = form.querySelector('button[type="submit"], button:not([type])');
+  if (button) {
+    button.disabled = false;
+    button.innerHTML = button.dataset.originalHtml || button.innerHTML;
+    delete button.dataset.originalHtml;
+  }
+  delete form.dataset.submitting;
+});
+
+document.querySelectorAll('form').forEach(form => form.addEventListener('submit', event => {
+  if (form.dataset.submitting === 'true') {
+    event.preventDefault();
+    return;
+  }
+  const button = form.querySelector('button[type="submit"], button:not([type])');
+  form.dataset.submitting = 'true';
+  if (button) {
+    button.dataset.originalHtml = button.innerHTML;
+    button.disabled = true;
+    button.textContent = 'Working…';
+  }
+  window.setTimeout(() => {
+    if (document.visibilityState === 'visible') resetSubmittedForms();
+  }, 15000);
 }));
+window.addEventListener('pageshow', resetSubmittedForms);
 document.querySelectorAll('[data-copy-target]').forEach(button => button.addEventListener('click', async () => {
   const target = document.getElementById(button.dataset.copyTarget);
   if (!target) return;

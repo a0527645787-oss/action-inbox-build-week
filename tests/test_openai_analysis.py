@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import func, select
 
 from app.analysis import analyze_email
@@ -90,11 +91,8 @@ def test_missing_evidence_rejects_fact_and_task(caplog):
     result = result_for(body)
     result.email_facts[0].evidence.start_offset = 1
     with caplog.at_level("WARNING", logger="actioninbox.openai"):
-        clean = validate_evidence(result, body)
-    assert clean.email_facts == []
-    assert clean.tasks == []
-    assert clean.action_required is False
-    assert any("Rejected task" in item for item in clean.missing_information)
+        with pytest.raises(LiveAnalysisError, match="semantically inconsistent"):
+            validate_evidence(result, body)
     assert "task_id=task" in caplog.text
     assert "reason=unknown_or_rejected_evidence_id" in caplog.text
     assert body not in caplog.text

@@ -140,6 +140,8 @@ def validate_evidence(result: EmailAnalysisResult, body: str, resources=None) ->
         reasons = []
         cited = []
         normalized_evidence_ids = []
+        if not task.title.strip():
+            reasons.append("missing_title")
         for item in task.evidence_ids:
             fact = fact_by_evidence_id.get(item) or fact_by_id.get(item)
             if fact:
@@ -168,9 +170,7 @@ def validate_evidence(result: EmailAnalysisResult, body: str, resources=None) ->
             missing.append(f"Rejected task without valid supporting evidence: {task.title}")
 
     clean.tasks = valid_tasks
-    if clean.action_required and not valid_tasks:
-        clean.action_required = False
-        missing.append("Action was marked required, but no fully supported task remained.")
+    _validate_action_semantics(clean)
 
     resource_map={f"resource-{resource.id}":resource for resource in (resources or [])}
     valid_guidance=[]
@@ -196,6 +196,16 @@ def validate_evidence(result: EmailAnalysisResult, body: str, resources=None) ->
     clean.execution_guidance = _validate_execution_guidance(clean.execution_guidance, set(fact_by_id), guidance_ids, bool(valid_tasks), missing)
     clean.missing_information = list(dict.fromkeys(missing))
     return clean
+
+
+def _validate_action_semantics(result: EmailAnalysisResult) -> None:
+    """Reject contradictory action state instead of repairing model output."""
+    if result.primary_classification == "action_required" and not result.action_required:
+        raise LiveAnalysisError("Structured analysis was semantically inconsistent")
+    if result.action_required and not result.tasks:
+        raise LiveAnalysisError("Structured analysis was semantically inconsistent")
+    if result.tasks and not result.action_required:
+        raise LiveAnalysisError("Structured analysis was semantically inconsistent")
 
 
 def _validate_execution_guidance(guidance, fact_ids: set[str], guidance_ids: set[str], actionable: bool, missing: list[str]):

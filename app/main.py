@@ -260,7 +260,7 @@ def analyze_inbox(db: Session = Depends(get_db), current_user: User = Depends(re
 
 
 @app.get("/emails/{email_id}")
-def email_detail(email_id: int, request: Request, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def email_detail(email_id: int, request: Request, analysis_error: int = 0, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     query = select(Email).where(Email.id == email_id, Email.user_id == current_user.id)
     if current_user.id == DEMO_USER_ID:
         query = query.where(Email.source == "demo")
@@ -270,7 +270,7 @@ def email_detail(email_id: int, request: Request, db: Session = Depends(get_db),
     return templates.TemplateResponse(
         request,
         "email.html",
-        {"email": email, "current_user": current_user},
+        {"email": email, "current_user": current_user, "analysis_error": bool(analysis_error)},
     )
 
 
@@ -291,14 +291,32 @@ def _owned_email(db: Session, email_id: int, user_id: str) -> Email:
 @app.post("/api/emails/{email_id}/analyze")
 def analyze(email_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_personal_user)):
     email = _owned_email(db, email_id, current_user.id)
-    analysis = analyze_email(db, email)
+    try:
+        analysis = analyze_email(db, email)
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "Single email analysis failed user_fingerprint=%s email_fingerprint=%s",
+            hashlib.sha256(current_user.id.encode()).hexdigest()[:12],
+            hashlib.sha256(str(email_id).encode()).hexdigest()[:12],
+        )
+        return RedirectResponse(f"/emails/{email_id}?analysis_error=1", 303)
     return RedirectResponse(f"/tasks/{email.task.id}" if analysis.action_required else f"/emails/{email.id}", 303)
 
 
 @app.post("/api/emails/{email_id}/reanalyze")
 def reanalyze(email_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_personal_user)):
     email = _owned_email(db, email_id, current_user.id)
-    analysis = analyze_email(db, email, force=True)
+    try:
+        analysis = analyze_email(db, email, force=True)
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "Single email reanalysis failed user_fingerprint=%s email_fingerprint=%s",
+            hashlib.sha256(current_user.id.encode()).hexdigest()[:12],
+            hashlib.sha256(str(email_id).encode()).hexdigest()[:12],
+        )
+        return RedirectResponse(f"/emails/{email_id}?analysis_error=1", 303)
     destination = f"/tasks/{email.task.id}" if analysis.action_required and email.task else f"/emails/{email.id}"
     return RedirectResponse(destination, 303)
 
