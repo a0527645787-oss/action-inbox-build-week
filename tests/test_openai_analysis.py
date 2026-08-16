@@ -96,20 +96,20 @@ def test_missing_evidence_rejects_fact_and_task(caplog):
     with caplog.at_level("WARNING", logger="actioninbox.openai"):
         with pytest.raises(LiveAnalysisError, match="local validation"):
             validate_evidence(result, body)
-    assert "task_id=task" in caplog.text
-    assert "reason=unknown_or_rejected_evidence_id" in caplog.text
+    assert "task_ordinal=0" in caplog.text
+    assert "rejection_enums=DEADLINE_WITHOUT_DEADLINE_EVIDENCE,UNKNOWN_OR_REJECTED_EVIDENCE_ID" in caplog.text
     assert body not in caplog.text
 
 
 def test_repair_is_bounded_and_uses_only_safe_diagnostics(caplog):
     body = "Approve USD 50 by July 21, 2026."
     invalid = result_for(body)
-    invalid.tasks[0].evidence_ids = ["unknown"]
+    invalid.tasks[0].evidence_ids = ["private-reference-id-77"]
     repaired = result_for(body)
     email = SimpleNamespace(sender="sender@example.test", subject="Synthetic", body=body)
     client = FakeClient([invalid, repaired])
 
-    with caplog.at_level("WARNING", logger="actioninbox.openai"):
+    with caplog.at_level("INFO", logger="actioninbox.openai"):
         result = request_live_analysis(email, client=client)
 
     assert result.tasks[0].title == "Approve payment"
@@ -120,10 +120,55 @@ def test_repair_is_bounded_and_uses_only_safe_diagnostics(caplog):
     assert "UNKNOWN_EVIDENCE_ID" in repair_text
     assert "complete replacement" in repair_text
     assert "Approve payment" not in repair_text
+    assert "private-reference-id-77" not in repair_text
     assert "UNKNOWN_EVIDENCE_ID" in caplog.text
     assert "total_tasks=1 valid_tasks=0" in caplog.text
+    assert "returned_facts=1 accepted_facts=1" in caplog.text
+    assert "returned_evidence=1 accepted_evidence=1" in caplog.text
+    assert "unresolved_references=1 failing_task_ordinals=0" in caplog.text
+    assert "Structured analysis accepted attempt=2" in caplog.text
+    assert "private-reference-id-77" not in caplog.text
     assert body not in caplog.text
     assert repr(invalid.model_dump()) not in caplog.text
+
+
+def test_canonical_fact_id_is_accepted_without_rewrite():
+    body = "Approve USD 50 by July 21, 2026."
+    result = result_for(body)
+    result.tasks[0].evidence_ids = ["deadline"]
+    clean = validate_evidence(result, body)
+    assert clean.tasks[0].evidence_ids == ["deadline"]
+
+
+def test_legacy_evidence_id_remains_accepted_without_rewrite():
+    body = "Approve USD 50 by July 21, 2026."
+    result = result_for(body)
+    assert result.tasks[0].evidence_ids == ["ev-deadline"]
+    clean = validate_evidence(result, body)
+    assert clean.tasks[0].evidence_ids == ["ev-deadline"]
+
+
+def test_discarded_fact_repairs_with_safe_counts(caplog):
+    body = "Approve USD 50 by July 21, 2026."
+    invalid = result_for(body)
+    invalid.email_facts[0].id = "private-fact-reference-77"
+    invalid.tasks[0].evidence_ids = ["private-fact-reference-77"]
+    invalid.email_facts[0].evidence.start_offset = 1
+    repaired = result_for(body)
+    repaired.tasks[0].evidence_ids = ["deadline"]
+    client = FakeClient([invalid, repaired])
+    email = SimpleNamespace(sender="sender@example.test", subject="Synthetic", body=body)
+
+    with caplog.at_level("WARNING", logger="actioninbox.openai"):
+        result = request_live_analysis(email, client=client)
+
+    assert len(client.responses.calls) == 2
+    assert result.tasks[0].evidence_ids == ["deadline"]
+    repair_text = client.responses.calls[1]["input"][-1]["content"]
+    assert "Returned facts: 1. Accepted facts: 0." in repair_text
+    assert "Returned evidence objects: 1. Accepted evidence objects: 0." in repair_text
+    assert "private-fact-reference-77" not in repair_text
+    assert body not in caplog.text
 
 
 def test_invalid_repair_makes_no_third_call():

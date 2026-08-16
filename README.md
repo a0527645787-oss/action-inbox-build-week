@@ -2,6 +2,8 @@
 
 ActionInbox turns incoming email into evidence-backed tasks, explains how to complete them, and prepares a safe execution handoff for user review.
 
+The current verified workflow is **invoice email → evidence-backed expense record → explicit approval → Google Sheets write → exact read-back verification**. It records payment tracking only; it does not pay invoices.
+
 ## Implemented
 
 - Explicit five-email demo ingestion with automatic inbox triage.
@@ -12,6 +14,7 @@ ActionInbox turns incoming email into evidence-backed tasks, explains how to com
 - Per-task outcome, ordered steps, required inputs, missing information, safety checks, proposed deliverable, executor recommendation, and readiness.
 - Preview, clipboard copy, and JSON download of a tenant-scoped execution package for ChatGPT Work or Codex.
 - Multi-user ownership, SQLite/MySQL SQLAlchemy configuration, and Alembic migrations.
+- Evidence-only invoice extraction and an approval-gated Google Sheets expense register connector.
 
 The execution package is preparation only. ActionInbox does not claim that Work, Codex, Gmail, Calendar, or another service executed anything.
 
@@ -124,6 +127,24 @@ demo data only:
 Task pages can copy a review-first prompt for Work or open the supported
 `codex://new` deep link with a prefilled prompt and repository origin. Neither
 path executes an external action automatically.
+
+## Google Sheets expense tracking
+
+Create a Google Cloud service account with access only to the target spreadsheet,
+keep its JSON key outside the repository, and share the sheet with the service
+account email. Configure `GOOGLE_APPLICATION_CREDENTIALS`,
+`ACTIONINBOX_SHEET_ID`, and `ACTIONINBOX_SHEET_TAB`. Production Compose mounts
+the key read-only; it is never copied into the image. For local Docker, add the
+same read-only bind mount in the ignored `docker-compose.override.yml`.
+
+The configured tab must have this header row:
+
+```text
+Created At | Supplier | Invoice Number | Amount | Currency | Due Date | Status | Source Email ID | ActionInbox Task ID | Verification Status
+```
+
+The public MCP endpoint remains read-only. `MCP_SHEETS_WRITE_ENABLED=false`
+documents that no unauthenticated MCP write tool is active in this MVP.
 # Production HTTPS
 
 The emergency AWS deployment is served at

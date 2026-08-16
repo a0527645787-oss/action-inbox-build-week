@@ -38,6 +38,7 @@ from .agent_execution import (
     serialize_execution,
 )
 from .execution import PACKAGE_EXECUTORS, build_execution_package, package_as_text, parse_structured_result
+from .invoice_execution import extract_invoice_details
 from .gmail import (
     GMAIL_MESSAGE_LIMIT,
     GMAIL_QUERY,
@@ -404,6 +405,7 @@ def task_detail(task_id: int, request: Request, db: Session = Depends(get_db), c
         "execution": result.execution_guidance,
         "executions": executions,
         "execution_idempotency_key": str(uuid4()),
+        "invoice_details": extract_invoice_details(task),
         "current_user": current_user,
     })
 

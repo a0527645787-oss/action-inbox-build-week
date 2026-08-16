@@ -137,11 +137,15 @@ def _fallback_execution_guidance(external_id: str, resource_guidance: list[dict]
 
 
 def _evidence_backed_task_title(task, result: EmailAnalysisResult) -> str:
-    facts_by_evidence_id = {fact.evidence.id: fact for fact in result.email_facts}
+    facts_by_reference = {
+        reference: fact
+        for fact in result.email_facts
+        for reference in (fact.id, fact.evidence.id)
+    }
     cited_documents = [
-        facts_by_evidence_id[item]
+        facts_by_reference[item]
         for item in task.evidence_ids
-        if item in facts_by_evidence_id and facts_by_evidence_id[item].type == "required_document"
+        if item in facts_by_reference and facts_by_reference[item].type == "required_document"
     ]
     if not cited_documents:
         return task.title
@@ -167,9 +171,13 @@ def _evidence_backed_task_title(task, result: EmailAnalysisResult) -> str:
 
 
 def _evidence_backed_deadline_text(task, result: EmailAnalysisResult) -> str | None:
-    facts_by_evidence_id = {fact.evidence.id: fact for fact in result.email_facts}
+    facts_by_reference = {
+        reference: fact
+        for fact in result.email_facts
+        for reference in (fact.id, fact.evidence.id)
+    }
     deadline_fact = next(
-        (facts_by_evidence_id[item] for item in task.evidence_ids if item in facts_by_evidence_id and facts_by_evidence_id[item].type == "deadline"),
+        (facts_by_reference[item] for item in task.evidence_ids if item in facts_by_reference and facts_by_reference[item].type == "deadline"),
         None,
     )
     return deadline_fact.value if deadline_fact else task.due_text

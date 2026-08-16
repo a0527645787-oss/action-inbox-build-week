@@ -19,6 +19,7 @@ __pycache__/
 client_secret*.json
 *oauth*credentials*.json
 google-credentials*.json
+*service-account*.json
 *.tmp
 *.temp
 .idea/

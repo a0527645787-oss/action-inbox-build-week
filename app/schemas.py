@@ -30,7 +30,9 @@ class TaskResult(StrictModel):
     due_at: str | None
     due_text: str | None
     uncertainty: str | None
-    evidence_ids: list[str]
+    evidence_ids: list[str] = Field(
+        description="Identifiers copied exactly from email_facts[].id in this same response; do not invent relationship IDs."
+    )
 
 
 class ResourceEvidenceResult(StrictModel):

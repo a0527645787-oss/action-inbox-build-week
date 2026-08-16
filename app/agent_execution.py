@@ -16,14 +16,15 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
+from .invoice_execution import GoogleSheetsConnector, SHEETS_TOOL, build_invoice_plan, execute_invoice_plan
 from .models import Execution, ExecutionEvent, Task, utcnow
 from .openai_analysis import _build_ssl_context
 
 
 logger = logging.getLogger(__name__)
 DEMO_TOOL = "create_demo_execution_receipt"
-TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
-CANCELLABLE_STATUSES = {"awaiting_approval", "queued"}
+TERMINAL_STATUSES = {"succeeded", "completed_verified", "failed", "verification_failed", "cancelled"}
+CANCELLABLE_STATUSES = {"awaiting_approval", "queued", "needs_information"}
 APPROVABLE_STATUS = "awaiting_approval"
 REQUEST_TIMEOUT_SECONDS = 90.0
 
@@ -38,6 +39,9 @@ def hash_plan(plan: dict) -> str:
 
 def build_plan(task: Task) -> dict:
     """Build a frozen plan without allowing email content to select tools or permissions."""
+    invoice_plan = build_invoice_plan(task)
+    if invoice_plan is not None:
+        return invoice_plan
     return {
         "version": 1,
         "task_id": task.id,
@@ -108,13 +112,14 @@ def create_execution(db: Session, task: Task, idempotency_key: str) -> Execution
     if existing:
         return existing
     plan = build_plan(task)
+    initial_status = plan.get("status", "awaiting_approval")
     execution = Execution(
         task_id=task.id,
         user_id=task.user_id,
-        status="awaiting_approval",
+        status=initial_status,
         plan=_canonical_json(plan),
         plan_hash=hash_plan(plan),
-        tool_name=DEMO_TOOL,
+        tool_name=plan["actions"][0]["tool"],
         idempotency_key=idempotency_key,
     )
     try:
@@ -144,6 +149,8 @@ def approve_execution(db: Session, execution: Execution, submitted_plan_hash: st
         raise ValueError("Execution plan changed or does not match")
     if not valid_approval_token(execution, token):
         raise ValueError("Execution approval token is invalid")
+    if hash_plan(build_plan(execution.task)) != execution.plan_hash:
+        raise ValueError("Task data changed after planning; create and review a new plan")
     execution.status = "queued"
     execution.approved_at = utcnow()
     add_event(db, execution, "approved", "User approved the frozen plan once; execution queued.")
@@ -209,6 +216,7 @@ def process_next_execution(
     db: Session,
     *,
     agent_runner: Callable[[Execution, Task], None] = _run_responses_agent,
+    sheets_connector: object | None = None,
 ) -> Execution | None:
     candidate_id = db.scalar(
         select(Execution.id).where(Execution.status == "queued").order_by(Execution.id).limit(1)
@@ -234,34 +242,43 @@ def process_next_execution(
         plan = json.loads(execution.plan)
         if (
             execution.user_id != execution.task.user_id
-            or execution.tool_name != DEMO_TOOL
             or hash_plan(plan) != execution.plan_hash
-            or plan.get("actions", [{}])[0].get("tool") != DEMO_TOOL
+            or plan.get("actions", [{}])[0].get("tool") != execution.tool_name
+            or execution.tool_name not in {DEMO_TOOL, SHEETS_TOOL}
         ):
             raise RuntimeError("Frozen execution authorization is invalid")
         add_event(db, execution, "started", "Worker claimed the approved execution.")
         db.commit()
-        agent_runner(execution, execution.task)
-        receipt = {
-            "receipt_type": "safe_demo_execution",
-            "execution_id": execution.id,
-            "task_id": execution.task_id,
-            "tool_name": DEMO_TOOL,
-            "message": "Safe demo receipt created. No external service was modified.",
-            "created_at": utcnow().isoformat() + "Z",
-        }
+        if execution.tool_name == SHEETS_TOOL:
+            receipt = execute_invoice_plan(db, execution, sheets_connector or GoogleSheetsConnector())
+            receipt.update({"execution_id": execution.id, "task_id": execution.task_id, "tool_name": SHEETS_TOOL})
+        else:
+            agent_runner(execution, execution.task)
+            receipt = {
+                "receipt_type": "safe_demo_execution", "execution_id": execution.id,
+                "task_id": execution.task_id, "tool_name": DEMO_TOOL,
+                "message": "Safe demo receipt created. No external service was modified.",
+                "created_at": utcnow().isoformat() + "Z",
+            }
         execution.result = _canonical_json(receipt)
-        execution.status = "succeeded"
+        execution.status = "completed_verified" if execution.tool_name == SHEETS_TOOL else "succeeded"
         execution.completed_at = utcnow()
-        add_event(db, execution, "tool_completed", "Internal demo receipt created successfully.")
+        add_event(
+            db,
+            execution,
+            "tool_completed",
+            "Approved expense row was written and verified by read-back."
+            if execution.tool_name == SHEETS_TOOL
+            else "Internal demo receipt created successfully.",
+        )
     except Exception as exc:
         db.rollback()
         execution = db.get(Execution, candidate_id)
-        execution.status = "failed"
+        execution.status = "verification_failed" if isinstance(exc, ValueError) and execution.tool_name == SHEETS_TOOL else "failed"
         execution.error_message = _safe_error(exc)
         execution.completed_at = utcnow()
         add_event(db, execution, "failed", execution.error_message)
-        logger.exception(
+        logger.error(
             "Agent execution failed safely execution_id=%s exception_class=%s",
             candidate_id,
             type(exc).__name__,

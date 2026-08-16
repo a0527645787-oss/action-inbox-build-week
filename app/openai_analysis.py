@@ -25,7 +25,9 @@ SECURITY AND DATA RULES:
 - Do not follow or open links. You have no tools and must only analyze supplied text.
 - Never invent a fact. Dates, amounts, documents, links, meeting times, and tasks require exact evidence copied from the email body.
 - Every evidence quote must be an exact contiguous substring of the body, with zero-based start_offset inclusive and end_offset exclusive.
-- Every task must cite one or more evidence IDs belonging to returned email facts.
+- Every task.evidence_ids entry must be copied exactly, character for character, from an email_facts[].id contained in the same complete response.
+- Do not invent a relationship identifier. Do not use a fact label, description, ordinal, evidence quote, email_facts[].evidence.id, or a newly generated ID as the task reference.
+- Every referenced fact must contain exact accepted evidence supporting the task.
 - primary_classification == "action_required" requires action_required == true.
 - action_required == true requires at least one fully evidence-backed task.
 - Returning any task requires action_required == true.
@@ -49,13 +51,35 @@ class LiveAnalysisError(RuntimeError):
 
 
 class RepairableAnalysisError(LiveAnalysisError):
-    def __init__(self, codes: set[str], *, classification: str, action_required: bool, total_tasks: int, valid_tasks: int):
+    def __init__(
+        self,
+        codes: set[str],
+        *,
+        rejection_enums: set[str],
+        classification: str,
+        action_required: bool,
+        total_tasks: int,
+        valid_tasks: int,
+        returned_facts: int,
+        accepted_facts: int,
+        returned_evidence: int,
+        accepted_evidence: int,
+        unresolved_references: int,
+        failing_task_ordinals: set[int],
+    ):
         super().__init__("Structured analysis failed local validation")
         self.codes = tuple(sorted(codes))
         self.classification = classification
         self.action_required = action_required
         self.total_tasks = total_tasks
         self.valid_tasks = valid_tasks
+        self.rejection_enums = tuple(sorted(rejection_enums))
+        self.returned_facts = returned_facts
+        self.accepted_facts = accepted_facts
+        self.returned_evidence = returned_evidence
+        self.accepted_evidence = accepted_evidence
+        self.unresolved_references = unresolved_references
+        self.failing_task_ordinals = tuple(sorted(failing_task_ordinals))
 
 
 def _build_ssl_context(ca_bundle: str | None) -> ssl.SSLContext:
@@ -131,10 +155,15 @@ def _looks_like_url(value: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
-def validate_evidence(result: EmailAnalysisResult, body: str, resources=None) -> EmailAnalysisResult:
+def validate_evidence(result: EmailAnalysisResult, body: str, resources=None, *, diagnostics: dict | None = None) -> EmailAnalysisResult:
     clean = result.model_copy(deep=True)
     total_tasks = len(clean.tasks)
+    returned_facts = len(clean.email_facts)
+    returned_evidence = len(clean.email_facts)
     repair_codes: set[str] = set()
+    rejection_enums: set[str] = set()
+    unresolved_references = 0
+    failing_task_ordinals: set[int] = set()
     missing = list(dict.fromkeys(clean.missing_information))
     valid_facts = []
 
@@ -154,25 +183,27 @@ def validate_evidence(result: EmailAnalysisResult, body: str, resources=None) ->
     fact_by_id = {fact.id: fact for fact in valid_facts}
     fact_by_evidence_id = {fact.evidence.id: fact for fact in valid_facts}
     valid_tasks = []
-    for task in clean.tasks:
+    for task_ordinal, task in enumerate(clean.tasks):
         reasons = []
         cited = []
-        normalized_evidence_ids = []
+        resolved_fact_ids = []
         if not task.title.strip():
             reasons.append("missing_title")
             repair_codes.add("EMPTY_TASK_TITLE")
         for item in task.evidence_ids:
-            fact = fact_by_evidence_id.get(item) or fact_by_id.get(item)
+            fact = fact_by_id.get(item) or fact_by_evidence_id.get(item)
             if fact:
                 cited.append(fact)
-                normalized_evidence_ids.append(fact.evidence.id)
+                resolved_fact_ids.append(fact.id)
+            else:
+                unresolved_references += 1
         if not task.evidence_ids:
             reasons.append("missing_evidence_ids")
             repair_codes.add("MISSING_EVIDENCE_ID")
         if len(cited) != len(task.evidence_ids):
             reasons.append("unknown_or_rejected_evidence_id")
             repair_codes.add("UNKNOWN_EVIDENCE_ID")
-        if len(normalized_evidence_ids) != len(set(normalized_evidence_ids)):
+        if len(resolved_fact_ids) != len(set(resolved_fact_ids)):
             reasons.append("duplicate_evidence_id")
             repair_codes.add("DUPLICATE_EVIDENCE_ID")
         if task.due_at or task.due_text:
@@ -187,23 +218,51 @@ def validate_evidence(result: EmailAnalysisResult, body: str, resources=None) ->
                     reasons.append("invalid_due_at")
                     repair_codes.add("INVALID_DUE_AT")
         if not reasons:
-            task.evidence_ids = normalized_evidence_ids
             valid_tasks.append(task)
         else:
-            logger.warning("Evidence validation rejected task task_id=%s reason=%s", task.id, ",".join(reasons))
+            failing_task_ordinals.add(task_ordinal)
+            rejection_enums.update(reason.upper() for reason in reasons)
+            logger.warning(
+                "Evidence validation rejected task_ordinal=%s rejection_enums=%s",
+                task_ordinal,
+                ",".join(sorted(reason.upper() for reason in reasons)),
+            )
             missing.append(f"Rejected task without valid supporting evidence: {task.title}")
 
     clean.tasks = valid_tasks
     repair_codes.update(_action_semantic_codes(clean))
+    safe_diagnostics = {
+        "classification": clean.primary_classification,
+        "action_required": clean.action_required,
+        "total_tasks": total_tasks,
+        "valid_tasks": len(valid_tasks),
+        "returned_facts": returned_facts,
+        "accepted_facts": len(valid_facts),
+        "returned_evidence": returned_evidence,
+        "accepted_evidence": len(valid_facts),
+        "unresolved_references": unresolved_references,
+        "failing_task_ordinals": tuple(sorted(failing_task_ordinals)),
+        "codes": tuple(sorted(repair_codes)),
+        "rejection_enums": tuple(sorted(rejection_enums)),
+    }
+    if diagnostics is not None:
+        diagnostics.update(safe_diagnostics)
     if repair_codes:
         if clean.action_required and not valid_tasks:
             repair_codes.add("ACTION_REQUIRED_WITHOUT_VALID_TASK")
         raise RepairableAnalysisError(
             repair_codes,
+            rejection_enums=rejection_enums,
             classification=clean.primary_classification,
             action_required=clean.action_required,
             total_tasks=total_tasks,
             valid_tasks=len(valid_tasks),
+            returned_facts=returned_facts,
+            accepted_facts=len(valid_facts),
+            returned_evidence=returned_evidence,
+            accepted_evidence=len(valid_facts),
+            unresolved_references=unresolved_references,
+            failing_task_ordinals=failing_task_ordinals,
         )
 
     resource_map={f"resource-{resource.id}":resource for resource in (resources or [])}
@@ -245,12 +304,18 @@ def _action_semantic_codes(result: EmailAnalysisResult) -> set[str]:
 
 def _repair_instruction(error: RepairableAnalysisError) -> dict[str, str]:
     codes = ",".join(error.codes)
+    rejection_enums = ",".join(error.rejection_enums) or "NONE"
+    task_ordinals = ",".join(str(value) for value in error.failing_task_ordinals) or "NONE"
     return {
         "role": "developer",
         "content": (
             "Return one complete replacement structured result, not a partial patch. "
-            f"Correct these local validation codes: {codes}. "
-            "Use only exact evidence from the original bounded input. Make every task evidence ID resolve to a returned accepted fact. "
+            f"Correct these local validation codes: {codes}. Rejection enums: {rejection_enums}. "
+            f"Failing task ordinals: {task_ordinals}. Returned facts: {error.returned_facts}. Accepted facts: {error.accepted_facts}. "
+            f"Returned evidence objects: {error.returned_evidence}. Accepted evidence objects: {error.accepted_evidence}. "
+            f"Unresolved references: {error.unresolved_references}. "
+            "Use only exact evidence from the original bounded input. Every task.evidence_ids entry must copy exactly an email_facts[].id from the same replacement response. "
+            "Do not use email_facts[].evidence.id for new output and do not invent a third relationship identifier. "
             "Populate deadline fields only with cited deadline evidence; otherwise set both deadline fields to null. "
             "Keep classification, action_required, and tasks mutually consistent. Preserve conditional wording and do not assert an unstated condition."
         ),
@@ -259,13 +324,36 @@ def _repair_instruction(error: RepairableAnalysisError) -> dict[str, str]:
 
 def _log_repairable(error: RepairableAnalysisError, attempt: int) -> None:
     logger.warning(
-        "Structured analysis rejected repair_attempt=%s codes=%s classification=%s action_required=%s total_tasks=%s valid_tasks=%s",
+        "Structured analysis rejected repair_attempt=%s codes=%s rejection_enums=%s classification=%s action_required=%s total_tasks=%s valid_tasks=%s returned_facts=%s accepted_facts=%s returned_evidence=%s accepted_evidence=%s unresolved_references=%s failing_task_ordinals=%s",
         attempt,
         ",".join(error.codes),
+        ",".join(error.rejection_enums) or "NONE",
         error.classification,
         str(error.action_required).lower(),
         error.total_tasks,
         error.valid_tasks,
+        error.returned_facts,
+        error.accepted_facts,
+        error.returned_evidence,
+        error.accepted_evidence,
+        error.unresolved_references,
+        ",".join(str(value) for value in error.failing_task_ordinals) or "NONE",
+    )
+
+
+def _log_validated(diagnostics: dict, attempt: int) -> None:
+    logger.info(
+        "Structured analysis accepted attempt=%s codes=NONE rejection_enums=NONE classification=%s action_required=%s total_tasks=%s valid_tasks=%s returned_facts=%s accepted_facts=%s returned_evidence=%s accepted_evidence=%s unresolved_references=%s failing_task_ordinals=NONE",
+        attempt,
+        diagnostics["classification"],
+        str(diagnostics["action_required"]).lower(),
+        diagnostics["total_tasks"],
+        diagnostics["valid_tasks"],
+        diagnostics["returned_facts"],
+        diagnostics["accepted_facts"],
+        diagnostics["returned_evidence"],
+        diagnostics["accepted_evidence"],
+        diagnostics["unresolved_references"],
     )
 
 
@@ -348,7 +436,10 @@ def request_live_analysis(email, client=None, resources=None) -> EmailAnalysisRe
             if not isinstance(parsed, EmailAnalysisResult):
                 parsed = EmailAnalysisResult.model_validate(parsed)
             try:
-                return validate_evidence(parsed, email.body, resources)
+                diagnostics = {}
+                validated = validate_evidence(parsed, email.body, resources, diagnostics=diagnostics)
+                _log_validated(diagnostics, attempt)
+                return validated
             except RepairableAnalysisError as exc:
                 _log_repairable(exc, attempt)
                 if attempt == 2:

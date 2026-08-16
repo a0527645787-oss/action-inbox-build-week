@@ -109,7 +109,7 @@ def _aws_task():
         "due_at": None,
         "due_text": None,
         "uncertainty": "Only update affected software if such dependencies exist.",
-        "evidence_ids": ["evidence-cloudtrail"],
+        "evidence_ids": ["fact-cloudtrail"],
     }
 
 
@@ -204,6 +204,42 @@ def test_failed_repair_reanalysis_restores_previous_analysis(db, monkeypatch):
     db.expire_all()
     assert db.get(Analysis, previous_analysis_id) is not None
     assert db.get(Task, previous_task_id) is not None
+    assert db.scalar(select(func.count()).select_from(Analysis).where(Analysis.email_id == email.id)) == 1
+    assert db.scalar(select(func.count()).select_from(Task).where(Task.email_id == email.id)) == 1
+
+
+def test_successful_repair_reanalysis_atomically_replaces_previous_pair(db, monkeypatch):
+    user, email = _gmail_email(db)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-a-secret")
+    from app.analysis import analyze_email
+    monkeypatch.setattr("app.analysis.request_live_analysis", lambda *args, **kwargs: _successful_result(email.body))
+    previous = analyze_email(db, email)
+    previous_task = db.scalar(select(Task).where(Task.email_id == email.id))
+
+    body = "CloudTrail consumers may depend on the replaced Billing event names or sources."
+    email.body = body
+    db.commit()
+    invalid = _aws_result(body, action_required=True, tasks=[{**_aws_task(), "evidence_ids": ["invented-link-id"]}])
+    repaired = _aws_result(body, action_required=True, tasks=[_aws_task()])
+    repair_client = _SequenceClient([invalid, repaired])
+    monkeypatch.setattr(
+        "app.analysis.request_live_analysis",
+        lambda target, **kwargs: request_live_analysis(target, client=repair_client),
+    )
+
+    try:
+        with _client(db, user) as http:
+            response = http.post(f"/api/emails/{email.id}/reanalyze", follow_redirects=False)
+            assert response.status_code == 303
+    finally:
+        app.dependency_overrides.clear()
+
+    assert len(repair_client.responses.calls) == 2
+    db.expire_all()
+    replacement = db.scalar(select(Analysis).where(Analysis.email_id == email.id))
+    replacement_task = db.scalar(select(Task).where(Task.email_id == email.id))
+    assert replacement.summary == "A scheduled AWS Billing API migration may affect conditional CloudTrail consumers."
+    assert replacement_task.title == _aws_task()["title"]
     assert db.scalar(select(func.count()).select_from(Analysis).where(Analysis.email_id == email.id)) == 1
     assert db.scalar(select(func.count()).select_from(Task).where(Task.email_id == email.id)) == 1
 

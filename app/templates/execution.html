@@ -26,17 +26,30 @@
   </div>
   <h3>Information shared</h3>
   <ul>{% for item in execution_data.plan.information_shared %}<li>{{ item }}</li>{% endfor %}</ul>
+  {% if execution_data.plan.write_data %}
+  <h3>Approved row preview</h3>
+  <div class="plan-grid">
+    {% for name, value in execution_data.plan.write_data.items() if name not in ['evidence', 'missing_fields'] %}
+    <div><small>{{ name|replace('_', ' ')|title }}</small><strong>{{ value or 'Missing' }}</strong></div>
+    {% endfor %}
+  </div>
+  <p><strong>Destination:</strong> configured sheet · {{ execution_data.plan.sheet_tab }}</p>
+  <p><strong>Success condition:</strong> {{ execution_data.plan.success_condition }}</p>
+  <p><strong>Idempotency key:</strong> <code>{{ execution_data.plan.idempotency_key }}</code></p>
+  {% endif %}
   <h3>Required permission</h3>
   <ul>{% for item in execution_data.plan.permissions_required %}<li>{{ item }}</li>{% endfor %}</ul>
   <h3>Safety boundaries</h3>
   <ul>{% for item in execution_data.plan.safety_notes %}<li>{{ item }}</li>{% endfor %}</ul>
   <small>Frozen plan hash: <code>{{ execution_record.plan_hash }}</code></small>
-  {% if execution_record.status == "awaiting_approval" %}
+  {% if execution_record.status == "needs_information" %}
+  <p class="notice">This plan cannot be approved until every required invoice field has exact supporting evidence.</p>
+  {% elif execution_record.status == "awaiting_approval" %}
   <div class="actions">
     <form method="post" action="/executions/{{ execution_record.id }}/approve">
       <input type="hidden" name="plan_hash" value="{{ execution_record.plan_hash }}">
       <input type="hidden" name="approval" value="{{ approval_token }}">
-      <button class="button" type="submit">Approve this plan once</button>
+      <button class="button" type="submit">{{ 'Approve and add to sheet' if execution_record.tool_name == 'append_verified_expense_row' else 'Approve this plan once' }}</button>
     </form>
     <form method="post" action="/executions/{{ execution_record.id }}/cancel">
       <button class="button secondary" type="submit">Cancel</button>
