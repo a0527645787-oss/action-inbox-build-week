@@ -46,7 +46,7 @@
 .landing-section { margin-top: 36px; padding: 54px; border: 1px solid var(--line); border-radius: 26px; background: rgba(255, 254, 250, .82); }
 .section-heading { display: grid; grid-template-columns: .55fr 1.45fr; gap: 28px; align-items: start; }
 .landing-section h2 { font-size: clamp(30px, 4vw, 48px); letter-spacing: -.045em; line-height: 1.08; margin: 0 0 30px; }
-.how-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px; }
+.how-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
 .how-card { min-height: 225px; padding: 25px; border: 1px solid var(--line); border-radius: 18px; background: var(--card); box-shadow: 0 12px 30px rgba(34, 55, 46, .06); transition: transform .25s ease, border-color .25s ease; }
 .how-card:hover { transform: translateY(-5px); border-color: #b7cfc3; }
 .how-card h3 { font-size: 21px; margin: 22px 0 10px; }

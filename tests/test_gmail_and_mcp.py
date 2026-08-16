@@ -238,9 +238,6 @@ def test_public_mcp_is_no_auth_read_only_and_synthetic_demo_only(db, monkeypatch
                                     json={"jsonrpc": "2.0", "id": 7, "method": "tools/call",
                                           "params": {"name": "get_actioninbox_task", "arguments": {"task_id": private_task.id}}})
         assert authenticated.status_code == 200 and authenticated.json()["error"]["message"] == "Task not found"
-        bypass = client.post("/mcp", json={"jsonrpc": "2.0", "id": 8, "method": "tools/call",
-            "params": {"name": "append_verified_expense_row", "arguments": {"task_id": demo_task.id, "approved": True}}})
-        assert bypass.json()["error"]["message"] == "Unknown tool"
     finally:
         app.dependency_overrides.clear()
 

@@ -1,20 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{{ task.title }} · ActionInbox{% endblock %}
 {% block content %}
-{% if invoice_details %}
-<section class="card section-stack invoice-workflow">
-  <span class="eyebrow">Verified business workflow</span>
-  <h2>Invoice email → verified payment-tracking row</h2>
-  <div class="plan-grid">
-    <div><small>Supplier</small><strong>{{ invoice_details.supplier or 'Missing' }}</strong></div>
-    <div><small>Invoice number</small><strong>{{ invoice_details.invoice_number or 'Missing' }}</strong></div>
-    <div><small>Amount</small><strong>{{ invoice_details.currency or 'Missing' }} {{ invoice_details.amount or '' }}</strong></div>
-    <div><small>Due date</small><strong>{{ invoice_details.due_date or 'Missing' }}</strong></div>
-  </div>
-  {% if invoice_details.missing_fields %}<p class="notice"><strong>Needs information:</strong> {{ invoice_details.missing_fields|join(', ') }}. Missing values are never invented.</p>{% endif %}
-  <p>This records an expense in the configured tracking sheet. It does not pay the invoice, send email, or modify Gmail.</p>
-</section>
-{% endif %}
 <a class="back" href="/dashboard">← Dashboard</a>
 <div class="detail-head"><div><div class="badge-row"><span class="badge">{{ task.email.analysis.classification|replace('_',' ') }}</span><span class="badge source">{{ 'Live GPT-5.6' if task.email.analysis.source == 'live_gpt' else 'Demo fallback' }}</span>{% if task.completed_at %}<span class="badge done">Completed</span>{% endif %}</div><h1>{{ task.title }}</h1><div class="actions"><form method="post" action="/api/emails/{{ task.email.id }}/reanalyze"><button class="text-button" type="submit">Re-analyze email</button></form>{% if task.completed_at %}<form method="post" action="/tasks/{{ task.id }}/reopen"><button class="button secondary" type="submit">Restore to active</button></form>{% else %}<form method="post" action="/tasks/{{ task.id }}/complete"><button class="button secondary" type="submit">Mark as completed</button></form>{% endif %}</div>{% if task.completed_at %}<p class="muted">Completed {{ task.completed_at }} by the current signed-in user.</p>{% endif %}</div><div class="deadline"><span>Deadline</span><strong>{{ task.deadline_text or 'No deadline' }}</strong></div></div>
 <section class="card section-stack"><span class="eyebrow">1 · What needs to be done</span><h2>{{ task.title }}</h2><p>{{ task.email.analysis.summary }}</p>{% if execution %}<p><strong>Successful outcome:</strong> {{ execution.outcome.text }} <span class="source-label {{ execution.outcome.source|lower }}">{{ execution.outcome.source|replace('_',' ') }}</span></p>{% endif %}</section>
@@ -32,7 +18,7 @@
   <p>The first click only creates a frozen plan. It does not perform an external action.</p>
   <form method="post" action="/tasks/{{ task.id }}/execution-plan">
     <input type="hidden" name="idempotency_key" value="{{ execution_idempotency_key }}">
-    <button class="button" type="submit">{{ 'Prepare expense record' if invoice_details else 'Execute with ActionInbox Agent' }}</button>
+    <button class="button" type="submit">Execute with ActionInbox Agent</button>
   </form>
   {% if executions %}
   <h3>Execution history</h3>

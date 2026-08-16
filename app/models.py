@@ -86,29 +86,6 @@ class Task(Base):
     completed_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
     email: Mapped[Email] = relationship(back_populates="task")
     executions: Mapped[list["Execution"]] = relationship(back_populates="task", cascade="all, delete-orphan")
-    expense_record: Mapped["ExpenseRecord | None"] = relationship(back_populates="task", cascade="all, delete-orphan", uselist=False)
-
-
-class ExpenseRecord(Base):
-    __tablename__ = "expense_records"
-    __table_args__ = (
-        UniqueConstraint("user_id", "task_id", name="uq_expense_records_user_task"),
-        UniqueConstraint("user_id", "supplier", "invoice_number", name="uq_expense_records_user_invoice"),
-    )
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
-    supplier: Mapped[str] = mapped_column(String(255))
-    invoice_number: Mapped[str] = mapped_column(String(100))
-    amount: Mapped[str] = mapped_column(String(100))
-    currency: Mapped[str] = mapped_column(String(20))
-    due_date: Mapped[str] = mapped_column(String(100))
-    source_email_id: Mapped[str] = mapped_column(String(255))
-    sheet_row: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    verification_status: Mapped[str] = mapped_column(String(40), default="pending")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
-    task: Mapped[Task] = relationship(back_populates="expense_record")
 
 
 class Execution(Base):

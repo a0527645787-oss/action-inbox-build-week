@@ -9,5 +9,3 @@ python-multipart==0.0.20
 alembic==1.16.4
 PyMySQL==1.1.1
 cryptography==45.0.5
-google-auth==2.40.3
-google-api-python-client==2.176.0
