@@ -307,3 +307,4 @@ def test_production_compose_keeps_credentials_worker_only_and_optional():
     assert "GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/actioninbox-google-service-account.json" in worker_section
     assert "${GOOGLE_APPLICATION_CREDENTIALS:-/dev/null}" in worker_section
     assert "${GOOGLE_APPLICATION_CREDENTIALS:?" not in compose
+    assert "networks:\n      - backend\n      - frontend" in worker_section

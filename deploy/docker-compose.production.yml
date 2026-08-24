@@ -74,6 +74,7 @@ services:
         condition: service_healthy
     networks:
       - backend
+      - frontend
     healthcheck:
       test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
       interval: 10s
