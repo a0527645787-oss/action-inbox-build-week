@@ -8,7 +8,7 @@
     <h1>Execution #{{ execution_record.id }}</h1>
     <p>Review the frozen plan before approving it. Approval is explicit and can be used only once.</p>
   </div>
-  <span class="badge {{ 'done' if execution_record.status == 'succeeded' else '' }}" id="execution-status">{{ execution_record.status|replace('_',' ') }}</span>
+  <span class="badge {{ 'done' if execution_record.status in ['succeeded', 'completed_verified'] else '' }}" id="execution-status">{{ execution_record.status|replace('_',' ') }}</span>
 </div>
 
 <section class="card section-stack">
@@ -26,6 +26,26 @@
   </div>
   <h3>Information shared</h3>
   <ul>{% for item in execution_data.plan.information_shared %}<li>{{ item }}</li>{% endfor %}</ul>
+  {% if execution_data.plan.proposal_id %}
+  <h3>Immutable Google Sheets proposal</h3>
+  <div class="plan-grid">
+    <div><small>Spreadsheet target</small><strong><code>{{ execution_data.plan.spreadsheet_id }}</code></strong></div>
+    <div><small>Tab</small><strong>{{ execution_data.plan.sheet_tab }}</strong></div>
+    <div><small>Proposal ID</small><strong><code>{{ execution_data.plan.proposal_id }}</code></strong></div>
+    <div><small>Created At</small><strong>{{ execution_data.plan.invoice.created_at }}</strong></div>
+    <div><small>Supplier</small><strong>{{ execution_data.plan.invoice.supplier }}</strong></div>
+    <div><small>Invoice number</small><strong>{{ execution_data.plan.invoice.invoice_number }}</strong></div>
+    <div><small>Amount</small><strong>{{ execution_data.plan.invoice.currency }} {{ execution_data.plan.invoice.amount }}</strong></div>
+    <div><small>Due date</small><strong>{{ execution_data.plan.invoice.due_date }}</strong></div>
+  </div>
+  <h4>Ordered column-to-value mapping</h4>
+  <ol>
+    {% for item in execution_data.plan.column_mapping %}
+    <li><strong>{{ item.column }}</strong>: <code>{{ item.value }}</code></li>
+    {% endfor %}
+  </ol>
+  <p><strong>Complete final row:</strong> <code>{{ execution_data.plan.final_row|tojson }}</code></p>
+  {% endif %}
   <h3>Required permission</h3>
   <ul>{% for item in execution_data.plan.permissions_required %}<li>{{ item }}</li>{% endfor %}</ul>
   <h3>Safety boundaries</h3>
@@ -36,7 +56,7 @@
     <form method="post" action="/executions/{{ execution_record.id }}/approve">
       <input type="hidden" name="plan_hash" value="{{ execution_record.plan_hash }}">
       <input type="hidden" name="approval" value="{{ approval_token }}">
-      <button class="button" type="submit">Approve this plan once</button>
+      <button class="button" type="submit">{{ 'Confirm and queue this exact row' if execution_data.plan.proposal_id else 'Approve this plan once' }}</button>
     </form>
     <form method="post" action="/executions/{{ execution_record.id }}/cancel">
       <button class="button secondary" type="submit">Cancel</button>
@@ -55,6 +75,7 @@
     {% if execution_data.result %}
     <p>{{ execution_data.result.message }}</p>
     <p><strong>Receipt:</strong> #{{ execution_data.result.execution_id }} · {{ execution_data.result.tool_name }}</p>
+    {% if execution_data.result.proposal_id %}<p><strong>Verified destination:</strong> <code>{{ execution_data.result.spreadsheet_id }}</code> · {{ execution_data.result.sheet_tab }} · {{ execution_data.result.sheet_range }}</p><p><strong>Proposal:</strong> <code>{{ execution_data.result.proposal_id }}</code> · plan <code>{{ execution_data.result.plan_hash }}</code> · {{ execution_data.result.verification_status }}</p>{% endif %}
     {% elif execution_record.error_message %}
     <p class="notice">{{ execution_record.error_message }}</p>
     {% else %}

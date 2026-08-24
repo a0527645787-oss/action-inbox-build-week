@@ -38,6 +38,7 @@ from .agent_execution import (
     serialize_execution,
 )
 from .execution import PACKAGE_EXECUTORS, build_execution_package, package_as_text, parse_structured_result
+from .invoice_execution import SheetsNotConfigured, extract_invoice_details, sheets_target
 from .gmail import (
     GMAIL_BOOTSTRAP_PAGE_LIMIT,
     GMAIL_DETAIL_CONCURRENCY,
@@ -420,6 +421,8 @@ def task_detail(task_id: int, request: Request, db: Session = Depends(get_db), c
         "execution": result.execution_guidance,
         "executions": executions,
         "execution_idempotency_key": str(uuid4()),
+        "invoice_details": extract_invoice_details(task),
+        "sheets_target_configured": sheets_target() is not None,
         "current_user": current_user,
     })
 
@@ -495,7 +498,12 @@ def execution_plan(
     key = idempotency_key.strip()
     if not key or len(key) > 100:
         raise HTTPException(422, "Invalid idempotency key")
-    execution = create_execution(db, task, key)
+    try:
+        execution = create_execution(db, task, key)
+    except SheetsNotConfigured as exc:
+        raise HTTPException(409, "SHEETS_NOT_CONFIGURED") from exc
+    except ValueError as exc:
+        raise HTTPException(409, "Invoice proposal could not be created from complete evidence-backed fields") from exc
     return RedirectResponse(f"/executions/{execution.id}", 303)
 
 

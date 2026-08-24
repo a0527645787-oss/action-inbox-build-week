@@ -7,25 +7,35 @@ import hmac
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import timedelta
 from typing import Callable
 
 import httpx
 from openai import OpenAI
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
+from .invoice_execution import (
+    GoogleSheetsConnector,
+    SHEETS_TOOL,
+    SheetsTransientError,
+    build_invoice_plan,
+    execute_invoice_plan,
+    validate_invoice_plan,
+)
 from .models import Execution, ExecutionEvent, Task, utcnow
 from .openai_analysis import _build_ssl_context
 
 
 logger = logging.getLogger(__name__)
 DEMO_TOOL = "create_demo_execution_receipt"
-TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
+TERMINAL_STATUSES = {"succeeded", "completed_verified", "failed", "verification_failed", "cancelled"}
 CANCELLABLE_STATUSES = {"awaiting_approval", "queued"}
 APPROVABLE_STATUS = "awaiting_approval"
 REQUEST_TIMEOUT_SECONDS = 90.0
+EXECUTION_LEASE_MINUTES = 5
+SHEETS_MAX_ATTEMPTS = 3
 
 
 def _canonical_json(value: dict) -> str:
@@ -38,6 +48,9 @@ def hash_plan(plan: dict) -> str:
 
 def build_plan(task: Task) -> dict:
     """Build a frozen plan without allowing email content to select tools or permissions."""
+    invoice_plan = build_invoice_plan(task)
+    if invoice_plan is not None:
+        return invoice_plan
     return {
         "version": 1,
         "task_id": task.id,
@@ -99,23 +112,27 @@ def add_event(
 
 
 def create_execution(db: Session, task: Task, idempotency_key: str) -> Execution:
-    existing = db.scalar(
-        select(Execution).where(
-            Execution.user_id == task.user_id,
-            Execution.idempotency_key == idempotency_key,
-        )
+    plan = build_plan(task)
+    effective_key = plan.get("proposal_id") or idempotency_key
+    is_sheet_plan = plan["actions"][0]["tool"] == SHEETS_TOOL
+    existing_query = select(Execution).where(Execution.user_id == task.user_id)
+    existing_query = (
+        existing_query.where(Execution.task_id == task.id, Execution.sheet_proposal_slot == 1)
+        if is_sheet_plan
+        else existing_query.where(Execution.idempotency_key == effective_key)
     )
+    existing = db.scalar(existing_query)
     if existing:
         return existing
-    plan = build_plan(task)
     execution = Execution(
         task_id=task.id,
         user_id=task.user_id,
         status="awaiting_approval",
         plan=_canonical_json(plan),
         plan_hash=hash_plan(plan),
-        tool_name=DEMO_TOOL,
-        idempotency_key=idempotency_key,
+        tool_name=plan["actions"][0]["tool"],
+        idempotency_key=effective_key,
+        sheet_proposal_slot=1 if is_sheet_plan else None,
     )
     try:
         db.add(execution)
@@ -124,12 +141,13 @@ def create_execution(db: Session, task: Task, idempotency_key: str) -> Execution
         db.commit()
     except IntegrityError:
         db.rollback()
-        raced = db.scalar(
-            select(Execution).where(
-                Execution.user_id == task.user_id,
-                Execution.idempotency_key == idempotency_key,
-            )
+        raced_query = select(Execution).where(Execution.user_id == task.user_id)
+        raced_query = (
+            raced_query.where(Execution.task_id == task.id, Execution.sheet_proposal_slot == 1)
+            if is_sheet_plan
+            else raced_query.where(Execution.idempotency_key == effective_key)
         )
+        raced = db.scalar(raced_query)
         if raced is None:
             raise
         return raced
@@ -144,6 +162,9 @@ def approve_execution(db: Session, execution: Execution, submitted_plan_hash: st
         raise ValueError("Execution plan changed or does not match")
     if not valid_approval_token(execution, token):
         raise ValueError("Execution approval token is invalid")
+    plan = json.loads(execution.plan)
+    if execution.tool_name == SHEETS_TOOL and not validate_invoice_plan(execution.task, plan):
+        raise ValueError("Task data or Sheets target changed after planning; create and review a new proposal")
     execution.status = "queued"
     execution.approved_at = utcnow()
     add_event(db, execution, "approved", "User approved the frozen plan once; execution queued.")
@@ -209,16 +230,32 @@ def process_next_execution(
     db: Session,
     *,
     agent_runner: Callable[[Execution, Task], None] = _run_responses_agent,
+    sheets_connector: object | None = None,
 ) -> Execution | None:
+    now = utcnow()
+    stale_started = now - timedelta(minutes=EXECUTION_LEASE_MINUTES)
+    recoverable_running = (
+        (Execution.status == "running")
+        & or_(
+            Execution.lease_expires_at < now,
+            (Execution.lease_expires_at.is_(None)) & (Execution.started_at < stale_started),
+        )
+    )
     candidate_id = db.scalar(
-        select(Execution.id).where(Execution.status == "queued").order_by(Execution.id).limit(1)
+        select(Execution.id).where(or_(Execution.status == "queued", recoverable_running)).order_by(Execution.id).limit(1)
     )
     if candidate_id is None:
         return None
     claimed = db.execute(
         update(Execution)
-        .where(Execution.id == candidate_id, Execution.status == "queued")
-        .values(status="running", started_at=utcnow())
+        .where(Execution.id == candidate_id, or_(Execution.status == "queued", recoverable_running))
+        .values(
+            status="running",
+            started_at=now,
+            heartbeat_at=now,
+            lease_expires_at=now + timedelta(minutes=EXECUTION_LEASE_MINUTES),
+            attempt_count=Execution.attempt_count + 1,
+        )
     )
     db.commit()
     if claimed.rowcount != 1:
@@ -234,34 +271,60 @@ def process_next_execution(
         plan = json.loads(execution.plan)
         if (
             execution.user_id != execution.task.user_id
-            or execution.tool_name != DEMO_TOOL
             or hash_plan(plan) != execution.plan_hash
-            or plan.get("actions", [{}])[0].get("tool") != DEMO_TOOL
+            or plan.get("actions", [{}])[0].get("tool") != execution.tool_name
+            or execution.tool_name not in {DEMO_TOOL, SHEETS_TOOL}
         ):
             raise RuntimeError("Frozen execution authorization is invalid")
         add_event(db, execution, "started", "Worker claimed the approved execution.")
         db.commit()
-        agent_runner(execution, execution.task)
-        receipt = {
-            "receipt_type": "safe_demo_execution",
-            "execution_id": execution.id,
-            "task_id": execution.task_id,
-            "tool_name": DEMO_TOOL,
-            "message": "Safe demo receipt created. No external service was modified.",
-            "created_at": utcnow().isoformat() + "Z",
-        }
+        if execution.tool_name == SHEETS_TOOL:
+            receipt = execute_invoice_plan(db, execution, sheets_connector or GoogleSheetsConnector())
+        else:
+            agent_runner(execution, execution.task)
+            receipt = {
+                "receipt_type": "safe_demo_execution",
+                "execution_id": execution.id,
+                "task_id": execution.task_id,
+                "tool_name": DEMO_TOOL,
+                "message": "Safe demo receipt created. No external service was modified.",
+                "created_at": utcnow().isoformat() + "Z",
+            }
         execution.result = _canonical_json(receipt)
-        execution.status = "succeeded"
+        execution.status = "completed_verified" if execution.tool_name == SHEETS_TOOL else "succeeded"
+        execution.error_message = None
         execution.completed_at = utcnow()
-        add_event(db, execution, "tool_completed", "Internal demo receipt created successfully.")
+        execution.lease_expires_at = None
+        add_event(
+            db,
+            execution,
+            "tool_completed",
+            "Approved invoice row was appended exactly once and verified by read-back."
+            if execution.tool_name == SHEETS_TOOL
+            else "Internal demo receipt created successfully.",
+        )
+    except SheetsTransientError as exc:
+        db.rollback()
+        execution = db.get(Execution, candidate_id)
+        execution.lease_expires_at = None
+        execution.error_message = "Execution is waiting for a safe bounded retry (SHEETS_PROVIDER_AMBIGUOUS)."
+        if execution.attempt_count < SHEETS_MAX_ATTEMPTS:
+            execution.status = "queued"
+            add_event(db, execution, "retry_queued", "Ambiguous Sheets result will be checked safely before another append attempt.")
+        else:
+            execution.status = "failed"
+            execution.completed_at = utcnow()
+            add_event(db, execution, "failed", "Sheets verification did not complete within the bounded retry limit.")
+        logger.warning("Sheets execution retry decision execution_id=%s code=%s attempt=%s", candidate_id, str(exc), execution.attempt_count)
     except Exception as exc:
         db.rollback()
         execution = db.get(Execution, candidate_id)
-        execution.status = "failed"
+        execution.status = "verification_failed" if isinstance(exc, ValueError) and execution.tool_name == SHEETS_TOOL else "failed"
         execution.error_message = _safe_error(exc)
         execution.completed_at = utcnow()
+        execution.lease_expires_at = None
         add_event(db, execution, "failed", execution.error_message)
-        logger.exception(
+        logger.error(
             "Agent execution failed safely execution_id=%s exception_class=%s",
             candidate_id,
             type(exc).__name__,

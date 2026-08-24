@@ -31,6 +31,9 @@ services:
       GMAIL_REDIRECT_URI: https://actioninboxapp.com/auth/google/callback
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:?TOKEN_ENCRYPTION_KEY is required}
       REPOSITORY_ORIGIN: https://github.com/a0527645787-oss/action-inbox-build-week.git
+      ACTIONINBOX_SHEETS_ENABLED: ${ACTIONINBOX_SHEETS_ENABLED:-false}
+      ACTIONINBOX_SHEET_ID: ${ACTIONINBOX_SHEET_ID:-}
+      ACTIONINBOX_SHEET_TAB: ${ACTIONINBOX_SHEET_TAB:-}
     depends_on:
       mysql:
         condition: service_healthy
@@ -55,11 +58,27 @@ services:
       DATABASE_URL: mysql+pymysql://${MYSQL_USER:?MYSQL_USER is required}:${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}@mysql:3306/${MYSQL_DATABASE:?MYSQL_DATABASE is required}?charset=utf8mb4
       SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required}
       OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY is required}
+      ACTIONINBOX_SHEETS_ENABLED: ${ACTIONINBOX_SHEETS_ENABLED:-false}
+      ACTIONINBOX_SHEET_ID: ${ACTIONINBOX_SHEET_ID:-}
+      ACTIONINBOX_SHEET_TAB: ${ACTIONINBOX_SHEET_TAB:-}
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/actioninbox-google-service-account.json
+    volumes:
+      - type: bind
+        source: ${GOOGLE_APPLICATION_CREDENTIALS:-/dev/null}
+        target: /run/secrets/actioninbox-google-service-account.json
+        read_only: true
+        bind:
+          create_host_path: false
     depends_on:
       actioninbox:
         condition: service_healthy
     networks:
       - backend
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   gmail-sync-worker:
     build:

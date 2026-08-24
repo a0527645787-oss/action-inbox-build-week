@@ -8,6 +8,9 @@ services:
       LOCAL_DEMO_AUTH_ENABLED: ${LOCAL_DEMO_AUTH_ENABLED:-true}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_CA_BUNDLE: ${OPENAI_CA_BUNDLE:-}
+      ACTIONINBOX_SHEETS_ENABLED: ${ACTIONINBOX_SHEETS_ENABLED:-false}
+      ACTIONINBOX_SHEET_ID: ${ACTIONINBOX_SHEET_ID:-}
+      ACTIONINBOX_SHEET_TAB: ${ACTIONINBOX_SHEET_TAB:-}
     volumes:
       - actioninbox_data:/data
     healthcheck:
@@ -23,6 +26,10 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:-local-demo-session-secret-change-me-123456}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_CA_BUNDLE: ${OPENAI_CA_BUNDLE:-}
+      ACTIONINBOX_SHEETS_ENABLED: ${ACTIONINBOX_SHEETS_ENABLED:-false}
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
+      ACTIONINBOX_SHEET_ID: ${ACTIONINBOX_SHEET_ID:-}
+      ACTIONINBOX_SHEET_TAB: ${ACTIONINBOX_SHEET_TAB:-}
     volumes:
       - actioninbox_data:/data
     depends_on:
@@ -66,6 +73,9 @@ services:
       DATABASE_URL: mysql+pymysql://actioninbox:${MYSQL_PASSWORD:-pilot-test-password}@mysql:3306/actioninbox?charset=utf8mb4
       LOCAL_DEMO_AUTH_ENABLED: "true"
       OPENAI_API_KEY: ""
+      ACTIONINBOX_SHEETS_ENABLED: ${ACTIONINBOX_SHEETS_ENABLED:-false}
+      ACTIONINBOX_SHEET_ID: ${ACTIONINBOX_SHEET_ID:-}
+      ACTIONINBOX_SHEET_TAB: ${ACTIONINBOX_SHEET_TAB:-}
     depends_on:
       mysql:
         condition: service_healthy
@@ -82,6 +92,10 @@ services:
       DATABASE_URL: mysql+pymysql://actioninbox:${MYSQL_PASSWORD:-pilot-test-password}@mysql:3306/actioninbox?charset=utf8mb4
       SESSION_SECRET: ${SESSION_SECRET:-local-demo-session-secret-change-me-123456}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ACTIONINBOX_SHEETS_ENABLED: ${ACTIONINBOX_SHEETS_ENABLED:-false}
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
+      ACTIONINBOX_SHEET_ID: ${ACTIONINBOX_SHEET_ID:-}
+      ACTIONINBOX_SHEET_TAB: ${ACTIONINBOX_SHEET_TAB:-}
     depends_on:
       actioninbox-mysql:
         condition: service_healthy

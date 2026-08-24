@@ -159,7 +159,8 @@ jobs:
                   'sudo docker compose --env-file /opt/actioninbox/.env '
                   '-f deploy/docker-compose.production.yml logs --tail 80 "$service" >&2 || true; return 1; fi; '
                   'sleep 3; attempt=$((attempt + 1)); done; }; '
-                  'wait_for_worker gmail-sync-worker "Gmail sync worker"'
+                  'wait_for_worker gmail-sync-worker "Gmail sync worker"; '
+                  'wait_for_worker execution-worker "Execution worker"'
               ),
               (
                   'http_status=$(curl --silent --show-error --output /dev/null '
