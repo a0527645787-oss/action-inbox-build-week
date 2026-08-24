@@ -49,7 +49,14 @@ def _invoice_task(db):
     user = User(id="91000000-0000-0000-0000-000000000001", email="invoice@example.test", display_name="Invoice User")
     db.add(user)
     db.commit()
-    body = "Supplier Northstar Office, invoice INV-2048 for USD 1,280 is due by July 21, 2026."
+    quotes = [
+        "Supplier: Northstar Office",
+        "Invoice Number: INV-2048",
+        "Amount: 1,280",
+        "Currency: USD",
+        "Due Date: July 21, 2026",
+    ]
+    body = "\n".join(quotes)
     email = Email(
         user_id=user.id,
         external_id="invoice-v2",
@@ -63,18 +70,24 @@ def _invoice_task(db):
     )
     db.add(email)
     db.flush()
-    evidence = {"id": "server-evidence-0", "exact_quote": body, "start_offset": 0, "end_offset": len(body)}
+    def evidence(index):
+        quote = quotes[index]
+        start = body.index(quote)
+        return {"id": f"server-evidence-{index}", "exact_quote": quote, "start_offset": start, "end_offset": start + len(quote)}
+
     facts = [
-        {"id": "server-fact-0", "type": "other", "value": "Northstar Office invoice INV-2048", "normalized_value": None, "confidence": "high", "uncertainty": None, "evidence": evidence},
-        {"id": "server-fact-1", "type": "amount", "value": "USD 1,280", "normalized_value": "1280 USD", "confidence": "high", "uncertainty": None, "evidence": {**evidence, "id": "server-evidence-1"}},
-        {"id": "server-fact-2", "type": "deadline", "value": "July 21, 2026", "normalized_value": "2026-07-21", "confidence": "high", "uncertainty": None, "evidence": {**evidence, "id": "server-evidence-2"}},
+        {"id": "server-fact-0", "type": "other", "value": "Northstar Office", "normalized_value": None, "confidence": "high", "uncertainty": None, "evidence": evidence(0)},
+        {"id": "server-fact-1", "type": "other", "value": "INV-2048", "normalized_value": None, "confidence": "high", "uncertainty": None, "evidence": evidence(1)},
+        {"id": "server-fact-2", "type": "amount", "value": "1,280", "normalized_value": "1280", "confidence": "high", "uncertainty": None, "evidence": evidence(2)},
+        {"id": "server-fact-3", "type": "other", "value": "USD", "normalized_value": "USD", "confidence": "high", "uncertainty": None, "evidence": evidence(3)},
+        {"id": "server-fact-4", "type": "deadline", "value": "July 21, 2026", "normalized_value": "2026-07-21", "confidence": "high", "uncertainty": None, "evidence": evidence(4)},
     ]
     structured = {
         "schema_version": "2",
         "primary_classification": "invoice",
         "action_required": True,
         "summary": "The invoice requires an approval-gated tracking row.",
-        "tasks": [{"id": "server-task-0", "title": "Track invoice INV-2048", "due_at": None, "due_text": "July 21, 2026", "uncertainty": None, "evidence_ids": ["server-fact-0", "server-fact-1", "server-fact-2"]}],
+        "tasks": [{"id": "server-task-0", "title": "Track invoice INV-2048", "due_at": None, "due_text": "July 21, 2026", "uncertainty": None, "evidence_ids": [fact["id"] for fact in facts]}],
         "email_facts": facts,
         "resource_guidance": [],
         "ai_suggestions": [],
@@ -120,6 +133,16 @@ def test_v2_evidence_builds_one_frozen_complete_proposal_without_writing(db, mon
     assert plan["final_row"][0] == plan["invoice"]["created_at"]
     assert plan["final_row"][1] == plan["proposal_id"]
     assert process_next_execution(db, sheets_connector=pytest.fail) is None
+    assert db.scalar(select(func.count()).select_from(SheetAppendRecord)) == 0
+
+
+def test_exact_sheet_tab_whitespace_is_preserved_in_frozen_proposal(db, monkeypatch):
+    _configure(monkeypatch)
+    monkeypatch.setenv("ACTIONINBOX_SHEET_TAB", "Expenses ")
+    _, task = _invoice_task(db)
+    execution = create_execution(db, task, "exact-tab")
+    assert json.loads(execution.plan)["sheet_tab"] == "Expenses "
+    assert execution.status == "awaiting_approval"
     assert db.scalar(select(func.count()).select_from(SheetAppendRecord)) == 0
 
 
@@ -230,14 +253,48 @@ def test_connected_task_page_offers_prepare_and_proposal_preview_is_exact(db, mo
         client = TestClient(app, base_url="https://testserver")
         task_page = client.get(f"/tasks/{task.id}")
         assert task_page.status_code == 200 and "Prepare expense record" in task_page.text
+        assert "Prepare expense record</button>" in task_page.text
         prepared = client.post(f"/tasks/{task.id}/execution-plan", data={"idempotency_key": "page-submit"}, follow_redirects=False)
         assert prepared.status_code == 303
+        duplicate = client.post(f"/tasks/{task.id}/execution-plan", data={"idempotency_key": "duplicate-click"}, follow_redirects=False)
+        assert duplicate.status_code == 303 and duplicate.headers["location"] == prepared.headers["location"]
         preview = client.get(prepared.headers["location"])
         assert preview.status_code == 200
         for expected in ("sheet-target-123", "Expenses", "Proposal ID", "Complete final row", "Northstar Office", "INV-2048", "Confirm and queue this exact row"):
             assert expected in preview.text
         execution = db.scalar(select(Execution).where(Execution.task_id == task.id))
-        assert execution.status == "awaiting_approval" and db.scalar(select(func.count()).select_from(SheetAppendRecord)) == 0
+        assert execution.status == "awaiting_approval"
+        assert db.scalar(select(func.count()).select_from(Execution)) == 1
+        assert db.scalar(select(func.count()).select_from(SheetAppendRecord)) == 0
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_proposal_failure_redirects_to_safe_notice_without_rows(db, monkeypatch):
+    _configure(monkeypatch)
+    user, task = _invoice_task(db)
+
+    def override_db():
+        yield db
+
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_current_user] = lambda: user
+    monkeypatch.setattr("app.main.create_execution", lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("private details")))
+    try:
+        client = TestClient(app, base_url="https://testserver")
+        response = client.post(
+            f"/tasks/{task.id}/execution-plan",
+            data={"idempotency_key": "safe-failure"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303 and response.headers["location"].endswith("?proposal_error=1")
+        notice = client.get(response.headers["location"])
+        assert notice.status_code == 200
+        assert "could not be prepared safely" in notice.text
+        assert "private details" not in notice.text
+        assert db.scalar(select(func.count()).select_from(Execution)) == 0
+        assert db.scalar(select(func.count()).select_from(SheetAppendRecord)) == 0
+        assert "Prepare expense record</button>" in notice.text
     finally:
         app.dependency_overrides.clear()
 

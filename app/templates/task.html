@@ -1,6 +1,9 @@
 {% extends "base.html" %}
 {% block title %}{{ task.title }} · ActionInbox{% endblock %}
 {% block content %}
+{% if proposal_error %}
+<section class="card notice"><p>The expense proposal could not be prepared safely. No external action was taken; please try again.</p></section>
+{% endif %}
 {% if invoice_details %}
 <section class="card section-stack invoice-workflow">
   <span class="eyebrow">Approval-gated invoice experiment</span>

@@ -380,7 +380,13 @@ def _owned_task(db: Session, task_id: int, user_id: str) -> Task:
 
 
 @app.get("/tasks/{task_id}")
-def task_detail(task_id: int, request: Request, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def task_detail(
+    task_id: int,
+    request: Request,
+    proposal_error: int = 0,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     task = _owned_task(db, task_id, current_user.id)
     before, evidence, after = highlighted_parts(task.email)
     guidance_views = []
@@ -423,6 +429,7 @@ def task_detail(task_id: int, request: Request, db: Session = Depends(get_db), c
         "execution_idempotency_key": str(uuid4()),
         "invoice_details": extract_invoice_details(task),
         "sheets_target_configured": sheets_target() is not None,
+        "proposal_error": bool(proposal_error),
         "current_user": current_user,
     })
 
@@ -500,10 +507,9 @@ def execution_plan(
         raise HTTPException(422, "Invalid idempotency key")
     try:
         execution = create_execution(db, task, key)
-    except SheetsNotConfigured as exc:
-        raise HTTPException(409, "SHEETS_NOT_CONFIGURED") from exc
-    except ValueError as exc:
-        raise HTTPException(409, "Invoice proposal could not be created from complete evidence-backed fields") from exc
+    except (SheetsNotConfigured, ValueError):
+        db.rollback()
+        return RedirectResponse(f"/tasks/{task.id}?proposal_error=1", 303)
     return RedirectResponse(f"/executions/{execution.id}", 303)
 
 

@@ -61,13 +61,31 @@ def sheets_target() -> tuple[str, str] | None:
     if os.getenv("ACTIONINBOX_SHEETS_ENABLED", "false").strip().casefold() != "true":
         return None
     sheet_id = os.getenv("ACTIONINBOX_SHEET_ID", "").strip()
-    sheet_tab = os.getenv("ACTIONINBOX_SHEET_TAB", "").strip()
-    return (sheet_id, sheet_tab) if sheet_id and sheet_tab else None
+    sheet_tab = os.getenv("ACTIONINBOX_SHEET_TAB", "")
+    return (sheet_id, sheet_tab) if sheet_id and sheet_tab.strip() else None
 
 
 def _match(pattern: str, text: str) -> str | None:
     found = re.search(pattern, text, re.IGNORECASE)
     return found.group(1).strip() if found else None
+
+
+def _single_amount_from_quote(quote: str) -> str | None:
+    """Return one unambiguous numeric amount copied from accepted evidence."""
+    matches = re.findall(r"\b[0-9][0-9,]*(?:\.[0-9]{1,2})?\b", quote)
+    distinct = list(dict.fromkeys(value.replace(",", "") for value in matches))
+    return distinct[0] if len(distinct) == 1 else None
+
+
+def _iso_currency_from_fact(fact, quote: str) -> str | None:
+    """Accept an ISO currency only when the accepted quote contains it verbatim."""
+    for candidate in (fact.normalized_value, fact.value):
+        currency = (candidate or "").strip().upper()
+        if re.fullmatch(r"[A-Z]{3}", currency) and re.search(
+            rf"\b{re.escape(currency)}\b", quote, re.IGNORECASE
+        ):
+            return currency
+    return None
 
 
 def extract_invoice_details(task: Task) -> InvoiceDetails | None:
@@ -89,15 +107,18 @@ def extract_invoice_details(task: Task) -> InvoiceDetails | None:
                 currency, amount = iso_amount.group(1).upper(), iso_amount.group(2).replace(",", "")
             elif dollar_amount:
                 currency, amount = "USD", dollar_amount.group(1).replace(",", "")
-            elif fact.normalized_value:
+            else:
+                amount = _single_amount_from_quote(quote)
+            if amount is None and fact.normalized_value:
                 normalized = re.search(r"(?:\b([A-Z]{3})\b\s*)?([0-9][0-9,]*(?:\.[0-9]{1,2})?)(?:\s*\b([A-Z]{3})\b)?", fact.normalized_value)
                 if normalized and (normalized.group(1) or normalized.group(3)):
                     currency = (normalized.group(1) or normalized.group(3)).upper()
                     amount = normalized.group(2).replace(",", "")
+        currency = currency or _iso_currency_from_fact(fact, quote)
         if fact.type == "deadline":
             due_date = fact.normalized_value or fact.value
         invoice_number = invoice_number or _match(r"\binvoice\s+(?:number\s*[:#]?\s*|#\s*)?([A-Z0-9][A-Z0-9-]+)", quote)
-        supplier = supplier or _match(r"\b(?:supplier|vendor|from)\s*[:\-]?\s*([A-Za-z][A-Za-z0-9 &.'-]{1,80}?)(?=\s+(?:invoice|has|for)|[,.;\n])", quote)
+        supplier = supplier or _match(r"\b(?:supplier|vendor|from)\s*[:\-]?\s*([A-Za-z][A-Za-z0-9 &.'-]{1,80}?)(?=\s+(?:invoice|has|for)|[,.;\n]|\s*$)", quote)
     missing = [name for name, value in {
         "supplier": supplier,
         "invoice_number": invoice_number,
