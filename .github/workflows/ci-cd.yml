@@ -136,14 +136,30 @@ jobs:
                   'exit 1; fi'
               ),
               (
+                  'wait_for_worker() { service="$1"; label="$2"; attempt=1; '
+                  'while [ "$attempt" -le 40 ]; do '
                   'worker_id="$(sudo docker compose --env-file /opt/actioninbox/.env '
-                  '-f deploy/docker-compose.production.yml ps -q gmail-sync-worker)"; '
-                  'if [ -z "$worker_id" ]; then echo "Gmail sync worker is not running" >&2; exit 1; fi; '
+                  '-f deploy/docker-compose.production.yml ps -q "$service")"; '
+                  'if [ -z "$worker_id" ]; then '
+                  'echo "$label container is missing" >&2; '
+                  'sudo docker compose --env-file /opt/actioninbox/.env '
+                  '-f deploy/docker-compose.production.yml logs --tail 80 "$service" >&2 || true; return 1; fi; '
+                  'worker_state="$(sudo docker inspect --format "{{.State.Status}}" "$worker_id")"; '
                   'worker_health="$(sudo docker inspect --format '
-                  "'{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "
+                  "'{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "
                   '$worker_id)"; '
-                  'if [ "$worker_health" != healthy ]; then '
-                  'echo "Gmail sync worker health check failed: $worker_health" >&2; exit 1; fi'
+                  'if [ "$worker_state" = running ] && [ "$worker_health" = healthy ]; then return 0; fi; '
+                  'if [ "$worker_state" = exited ] || [ "$worker_state" = dead ] || '
+                  '[ "$worker_health" = unhealthy ]; then '
+                  'echo "$label failed: state=$worker_state health=$worker_health" >&2; '
+                  'sudo docker compose --env-file /opt/actioninbox/.env '
+                  '-f deploy/docker-compose.production.yml logs --tail 80 "$service" >&2 || true; return 1; fi; '
+                  'if [ "$attempt" -eq 40 ]; then '
+                  'echo "$label timed out: state=$worker_state health=$worker_health" >&2; '
+                  'sudo docker compose --env-file /opt/actioninbox/.env '
+                  '-f deploy/docker-compose.production.yml logs --tail 80 "$service" >&2 || true; return 1; fi; '
+                  'sleep 3; attempt=$((attempt + 1)); done; }; '
+                  'wait_for_worker gmail-sync-worker "Gmail sync worker"'
               ),
               (
                   'http_status=$(curl --silent --show-error --output /dev/null '
