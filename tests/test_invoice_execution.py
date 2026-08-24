@@ -146,6 +146,29 @@ def test_exact_sheet_tab_whitespace_is_preserved_in_frozen_proposal(db, monkeypa
     assert db.scalar(select(func.count()).select_from(SheetAppendRecord)) == 0
 
 
+def test_terminal_failed_proposal_with_changed_target_requires_one_new_review(db, monkeypatch):
+    _configure(monkeypatch)
+    _, task = _invoice_task(db)
+    failed = create_execution(db, task, "original-target")
+    failed.status = "failed"
+    failed.completed_at = utcnow()
+    db.commit()
+
+    monkeypatch.setenv("ACTIONINBOX_SHEET_TAB", "Corrected Expenses")
+    replacement = create_execution(db, task, "corrected-target")
+    duplicate = create_execution(db, task, "duplicate-click")
+
+    db.refresh(failed)
+    assert replacement.id != failed.id
+    assert failed.status == "failed" and failed.sheet_proposal_slot is None
+    assert duplicate.id == replacement.id
+    assert replacement.status == "awaiting_approval" and replacement.sheet_proposal_slot == 1
+    assert json.loads(replacement.plan)["sheet_tab"] == "Corrected Expenses"
+    assert db.scalar(select(func.count()).select_from(Execution)) == 2
+    assert db.scalar(select(func.count()).select_from(SheetAppendRecord)) == 0
+    assert process_next_execution(db, sheets_connector=pytest.fail) is None
+
+
 def test_separate_approval_appends_raw_row_once_and_persists_exact_receipt(db, monkeypatch):
     _configure(monkeypatch)
     _, task = _invoice_task(db)

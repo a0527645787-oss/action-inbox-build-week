@@ -123,7 +123,22 @@ def create_execution(db: Session, task: Task, idempotency_key: str) -> Execution
     )
     existing = db.scalar(existing_query)
     if existing:
-        return existing
+        if not (is_sheet_plan and existing.status in TERMINAL_STATUSES):
+            return existing
+        try:
+            existing_plan = json.loads(existing.plan)
+        except (TypeError, ValueError):
+            existing_plan = {}
+        if validate_invoice_plan(task, existing_plan):
+            return existing
+        existing.sheet_proposal_slot = None
+        add_event(
+            db,
+            existing,
+            "superseded",
+            "Terminal proposal no longer matches the configured target; a new review is required.",
+        )
+        db.flush()
     execution = Execution(
         task_id=task.id,
         user_id=task.user_id,
