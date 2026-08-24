@@ -5,9 +5,10 @@ from sqlalchemy import func, select
 
 from app.analysis import analyze_email, fallback_analysis
 from app.demo_data import load_demo_emails
+from app.execution import parse_structured_result
 from app.models import Email, Task
-from app.openai_analysis import MAX_EMAIL_CHARS, LiveAnalysisError, SYSTEM_PROMPT, _build_ssl_context, build_input, log_openai_exception, request_live_analysis, validate_evidence
-from app.schemas import EmailAnalysisResult
+from app.openai_analysis import MAX_EMAIL_CHARS, LiveAnalysisError, SYSTEM_PROMPT, _build_ssl_context, build_input, log_openai_exception, request_live_analysis, validate_evidence, validate_model_output
+from app.schemas import EmailAnalysisResult, ModelEmailAnalysisResultV2
 
 
 class FakeResponses:
@@ -43,21 +44,44 @@ def execution_guidance(fact_id="deadline"):
     }
 
 
+def model_execution_guidance(fact_index=0):
+    def item(text, source, facts=None):
+        return {"text":text,"source":source,"supporting_fact_indices":facts or [],"supporting_guidance_indices":[]}
+    return {
+        "outcome":item("The supported task is prepared.","EMAIL_FACT",[fact_index]),
+        "ordered_steps":[item("Review the supported fact, then prepare the task for approval.","AI_RECOMMENDATION",[fact_index])],
+        "required_inputs":[item("User approval.","MISSING_UNCERTAIN")],
+        "missing_information":["User approval is not yet recorded."],
+        "safety_checks":[item("Do not perform an external action without approval.","AI_RECOMMENDATION")],
+        "proposed_deliverable":item("A review brief.","AI_RECOMMENDATION"),
+        "recommended_executor":"ACTIONINBOX","executor_explanation":"ActionInbox can prepare the brief only.","readiness":"NEEDS_APPROVAL",
+    }
+
+
 def result_for(body, *, url=None):
     quote = "Approve USD 50 by July 21, 2026."
-    start = body.index(quote)
     facts = [
-        {"id":"deadline","type":"deadline","value":"July 21, 2026","normalized_value":"2026-07-21","confidence":"high","uncertainty":None,"evidence":{"id":"ev-deadline","exact_quote":quote,"start_offset":start,"end_offset":start+len(quote)}}
+        {"type":"deadline","value":"July 21, 2026","normalized_value":"2026-07-21","confidence":"high","uncertainty":None,"evidence":{"exact_quote":quote}}
     ]
     if url:
-        facts.append({"id":"link","type":"important_link","value":url,"normalized_value":None,"confidence":"high","uncertainty":None,"evidence":{"id":"ev-link","exact_quote":quote,"start_offset":start,"end_offset":start+len(quote)}})
-    return EmailAnalysisResult.model_validate({
+        facts.append({"type":"important_link","value":url,"normalized_value":None,"confidence":"high","uncertainty":None,"evidence":{"exact_quote":quote}})
+    return ModelEmailAnalysisResultV2.model_validate({
+        "schema_version":"2",
         "primary_classification":"invoice","action_required":True,"summary":"Approval is required.",
-        "tasks":[{"id":"task","title":"Approve payment","due_at":"2026-07-21T00:00:00","due_text":"July 21, 2026","uncertainty":None,"evidence_ids":["ev-deadline"]}],
+        "tasks":[{"title":"Approve payment","due_at":"2026-07-21T00:00:00","due_text":"July 21, 2026","uncertainty":None,"fact_indices":[0]}],
         "email_facts":facts,"resource_guidance":[],
-        "ai_suggestions":[{"type":"next_step","text":"Review the payment.","supporting_fact_ids":["deadline"],"supporting_guidance_ids":[],"uncertainty":None}],
-        "missing_information":[],"execution_guidance":execution_guidance(),
+        "ai_suggestions":[{"type":"next_step","text":"Review the payment.","supporting_fact_indices":[0],"supporting_guidance_indices":[],"uncertainty":None}],
+        "missing_information":[],"execution_guidance":model_execution_guidance(),
     })
+
+
+def legacy_result_for(body, *, url=None):
+    quote = "Approve USD 50 by July 21, 2026."
+    start = body.index(quote)
+    facts = [{"id":"deadline","type":"deadline","value":"July 21, 2026","normalized_value":"2026-07-21","confidence":"high","uncertainty":None,"evidence":{"id":"ev-deadline","exact_quote":quote,"start_offset":start,"end_offset":start+len(quote)}}]
+    if url:
+        facts.append({"id":"link","type":"important_link","value":url,"normalized_value":None,"confidence":"high","uncertainty":None,"evidence":{"id":"ev-link","exact_quote":quote,"start_offset":start,"end_offset":start+len(quote)}})
+    return EmailAnalysisResult.model_validate({"primary_classification":"invoice","action_required":True,"summary":"Approval is required.","tasks":[{"id":"task","title":"Approve payment","due_at":"2026-07-21T00:00:00","due_text":"July 21, 2026","uncertainty":None,"evidence_ids":["ev-deadline"]}],"email_facts":facts,"resource_guidance":[],"ai_suggestions":[],"missing_information":[],"execution_guidance":None})
 
 
 def test_valid_structured_analysis_is_persisted_as_live(db):
@@ -66,12 +90,12 @@ def test_valid_structured_analysis_is_persisted_as_live(db):
     email.source = "test"
     db.commit()
     quote = "Please approve invoice INV-2048 for USD 1,280 by July 21, 2026."
-    start = email.body.index(quote)
-    output = EmailAnalysisResult.model_validate({
+    output = ModelEmailAnalysisResultV2.model_validate({
+        "schema_version":"2",
         "primary_classification":"invoice","action_required":True,"summary":"Invoice approval required.",
-        "tasks":[{"id":"task","title":"Approve INV-2048","due_at":"2026-07-21T00:00:00","due_text":"July 21, 2026","uncertainty":None,"evidence_ids":["ev"]}],
-        "email_facts":[{"id":"deadline","type":"deadline","value":"July 21, 2026","normalized_value":"2026-07-21","confidence":"high","uncertainty":None,"evidence":{"id":"ev","exact_quote":quote,"start_offset":start,"end_offset":start+len(quote)}}],
-        "resource_guidance":[],"ai_suggestions":[],"missing_information":[],"execution_guidance":execution_guidance(),
+        "tasks":[{"title":"Approve INV-2048","due_at":"2026-07-21T00:00:00","due_text":"July 21, 2026","uncertainty":None,"fact_indices":[0]}],
+        "email_facts":[{"type":"deadline","value":"July 21, 2026","normalized_value":"2026-07-21","confidence":"high","uncertainty":None,"evidence":{"exact_quote":quote}}],
+        "resource_guidance":[],"ai_suggestions":[],"missing_information":[],"execution_guidance":model_execution_guidance(),
     })
     client = FakeClient(output)
     analysis = analyze_email(db, email, client=client)
@@ -79,19 +103,19 @@ def test_valid_structured_analysis_is_persisted_as_live(db):
     assert analysis.model == "gpt-5.6"
     assert db.scalar(select(Task)).title == "Approve INV-2048"
     assert client.responses.kwargs["store"] is False
-    assert client.responses.kwargs["text_format"] is EmailAnalysisResult
+    assert client.responses.kwargs["text_format"] is ModelEmailAnalysisResultV2
 
 
 def test_invented_url_is_rejected():
     body = "Approve USD 50 by July 21, 2026."
-    clean = validate_evidence(result_for(body, url="https://invented.example/steal"), body)
-    assert all(fact.type != "important_link" for fact in clean.email_facts)
-    assert any("important_link" in item for item in clean.missing_information)
+    with pytest.raises(LiveAnalysisError, match="local validation") as caught:
+        validate_model_output(result_for(body, url="https://invented.example/steal"), body)
+    assert "INVALID_BODY_URL" in caught.value.codes
 
 
 def test_missing_evidence_rejects_fact_and_task(caplog):
     body = "Approve USD 50 by July 21, 2026."
-    result = result_for(body)
+    result = legacy_result_for(body)
     result.email_facts[0].evidence.start_offset = 1
     with caplog.at_level("WARNING", logger="actioninbox.openai"):
         with pytest.raises(LiveAnalysisError, match="local validation"):
@@ -104,7 +128,7 @@ def test_missing_evidence_rejects_fact_and_task(caplog):
 def test_repair_is_bounded_and_uses_only_safe_diagnostics(caplog):
     body = "Approve USD 50 by July 21, 2026."
     invalid = result_for(body)
-    invalid.tasks[0].evidence_ids = ["private-reference-id-77"]
+    invalid.tasks[0].fact_indices = [77]
     repaired = result_for(body)
     email = SimpleNamespace(sender="sender@example.test", subject="Synthetic", body=body)
     client = FakeClient([invalid, repaired])
@@ -117,24 +141,22 @@ def test_repair_is_bounded_and_uses_only_safe_diagnostics(caplog):
     repair_input = client.responses.calls[1]["input"]
     assert repair_input[:-1] == client.responses.calls[0]["input"]
     repair_text = repair_input[-1]["content"]
-    assert "UNKNOWN_EVIDENCE_ID" in repair_text
+    assert "FACT_INDEX_OUT_OF_RANGE" in repair_text
     assert "complete replacement" in repair_text
     assert "Approve payment" not in repair_text
-    assert "private-reference-id-77" not in repair_text
-    assert "UNKNOWN_EVIDENCE_ID" in caplog.text
+    assert "FACT_INDEX_OUT_OF_RANGE" in caplog.text
     assert "total_tasks=1 valid_tasks=0" in caplog.text
     assert "returned_facts=1 accepted_facts=1" in caplog.text
     assert "returned_evidence=1 accepted_evidence=1" in caplog.text
     assert "unresolved_references=1 failing_task_ordinals=0" in caplog.text
     assert "Structured analysis accepted attempt=2" in caplog.text
-    assert "private-reference-id-77" not in caplog.text
     assert body not in caplog.text
     assert repr(invalid.model_dump()) not in caplog.text
 
 
 def test_canonical_fact_id_is_accepted_without_rewrite():
     body = "Approve USD 50 by July 21, 2026."
-    result = result_for(body)
+    result = legacy_result_for(body)
     result.tasks[0].evidence_ids = ["deadline"]
     clean = validate_evidence(result, body)
     assert clean.tasks[0].evidence_ids == ["deadline"]
@@ -142,20 +164,95 @@ def test_canonical_fact_id_is_accepted_without_rewrite():
 
 def test_legacy_evidence_id_remains_accepted_without_rewrite():
     body = "Approve USD 50 by July 21, 2026."
-    result = result_for(body)
+    result = legacy_result_for(body)
     assert result.tasks[0].evidence_ids == ["ev-deadline"]
     clean = validate_evidence(result, body)
     assert clean.tasks[0].evidence_ids == ["ev-deadline"]
 
 
+def test_legacy_persisted_result_remains_readable():
+    body = "Approve USD 50 by July 21, 2026."
+    legacy = legacy_result_for(body)
+    restored = parse_structured_result(legacy.model_dump_json(exclude={"schema_version"}))
+    assert restored.schema_version == "1"
+    assert restored.tasks[0].evidence_ids == ["ev-deadline"]
+
+
+def test_v2_server_derives_exact_offsets_and_metadata():
+    body = "Prefix. Approve USD 50 by July 21, 2026. Suffix."
+    clean = validate_model_output(result_for(body), body)
+    evidence = clean.email_facts[0].evidence
+    assert clean.schema_version == "2"
+    assert evidence.start_offset == body.index(evidence.exact_quote)
+    assert evidence.end_offset == evidence.start_offset + len(evidence.exact_quote)
+    assert clean.tasks[0].evidence_ids == ["fact-1"]
+
+
+def test_v2_quote_not_found_has_distinct_safe_code():
+    body = "Approve USD 50 by July 21, 2026."
+    output = result_for(body)
+    output.email_facts[0].evidence.exact_quote = "not present secret quote"
+    with pytest.raises(LiveAnalysisError) as caught:
+        validate_model_output(output, body)
+    assert "EXACT_QUOTE_NOT_FOUND" in caught.value.codes
+    assert "FACT_INDEX_REFERENCES_REJECTED_FACT" in caught.value.codes
+
+
+@pytest.mark.parametrize(
+    "quote,value,code",
+    [
+        ("", "July 21, 2026", "EMPTY_EXACT_QUOTE"),
+        ("Approve USD 50 by July 21, 2026.", "August 1, 2026", "FACT_VALUE_NOT_SUPPORTED_BY_QUOTE"),
+    ],
+)
+def test_v2_fact_rejection_codes_are_distinct(quote, value, code):
+    body = "Approve USD 50 by July 21, 2026."
+    output = result_for(body)
+    output.email_facts[0].evidence.exact_quote = quote
+    output.email_facts[0].value = value
+    with pytest.raises(LiveAnalysisError) as caught:
+        validate_model_output(output, body)
+    assert code in caught.value.codes
+
+
+def test_v2_repeated_quote_uses_first_occurrence_deterministically():
+    quote = "Approve USD 50 by July 21, 2026."
+    body = f"{quote} spacer {quote}"
+    clean = validate_model_output(result_for(body), body)
+    assert clean.email_facts[0].evidence.start_offset == 0
+    assert clean.email_facts[0].evidence.end_offset == len(quote)
+
+
+@pytest.mark.parametrize("indices,code", [([3], "FACT_INDEX_OUT_OF_RANGE"), ([0, 0], "DUPLICATE_FACT_INDEX")])
+def test_v2_rejects_invalid_positional_references(indices, code):
+    body = "Approve USD 50 by July 21, 2026."
+    output = result_for(body)
+    output.tasks[0].fact_indices = indices
+    with pytest.raises(LiveAnalysisError) as caught:
+        validate_model_output(output, body)
+    assert code in caught.value.codes
+
+
+def test_v2_diagnostics_contain_codes_and_counts_not_content(caplog):
+    body = "Approve USD 50 by July 21, 2026. secret-body-marker"
+    output = result_for(body)
+    output.email_facts[0].evidence.exact_quote = "private-invalid-quote"
+    email = SimpleNamespace(sender="private-sender@example.test", subject="private-subject", body=body)
+    with caplog.at_level("WARNING", logger="actioninbox.openai"):
+        with pytest.raises(LiveAnalysisError):
+            request_live_analysis(email, client=FakeClient([output, output]))
+    assert "EXACT_QUOTE_NOT_FOUND" in caplog.text
+    assert "returned_facts=1 accepted_facts=0" in caplog.text
+    assert "private-invalid-quote" not in caplog.text
+    assert "secret-body-marker" not in caplog.text
+    assert "private-sender@example.test" not in caplog.text
+
+
 def test_discarded_fact_repairs_with_safe_counts(caplog):
     body = "Approve USD 50 by July 21, 2026."
     invalid = result_for(body)
-    invalid.email_facts[0].id = "private-fact-reference-77"
-    invalid.tasks[0].evidence_ids = ["private-fact-reference-77"]
-    invalid.email_facts[0].evidence.start_offset = 1
+    invalid.email_facts[0].evidence.exact_quote = "private quote not in bounded body"
     repaired = result_for(body)
-    repaired.tasks[0].evidence_ids = ["deadline"]
     client = FakeClient([invalid, repaired])
     email = SimpleNamespace(sender="sender@example.test", subject="Synthetic", body=body)
 
@@ -163,18 +260,19 @@ def test_discarded_fact_repairs_with_safe_counts(caplog):
         result = request_live_analysis(email, client=client)
 
     assert len(client.responses.calls) == 2
-    assert result.tasks[0].evidence_ids == ["deadline"]
+    assert result.tasks[0].evidence_ids == ["fact-1"]
     repair_text = client.responses.calls[1]["input"][-1]["content"]
     assert "Returned facts: 1. Accepted facts: 0." in repair_text
     assert "Returned evidence objects: 1. Accepted evidence objects: 0." in repair_text
-    assert "private-fact-reference-77" not in repair_text
+    assert "EXACT_QUOTE_NOT_FOUND" in repair_text
+    assert "private quote not in bounded body" not in repair_text
     assert body not in caplog.text
 
 
 def test_invalid_repair_makes_no_third_call():
     body = "Approve USD 50 by July 21, 2026."
     invalid = result_for(body)
-    invalid.tasks[0].evidence_ids = ["unknown"]
+    invalid.tasks[0].fact_indices = [99]
     client = FakeClient([invalid, invalid, result_for(body)])
     email = SimpleNamespace(sender="sender@example.test", subject="Synthetic", body=body)
 
@@ -187,13 +285,14 @@ def test_invalid_repair_makes_no_third_call():
 def test_repair_removes_unsupported_deadline():
     body = "Review whether the integration is affected."
     quote = body
-    fact = {"id":"condition","type":"other","value":quote,"normalized_value":None,"confidence":"high","uncertainty":None,"evidence":{"id":"ev-condition","exact_quote":quote,"start_offset":0,"end_offset":len(quote)}}
+    fact = {"type":"other","value":quote,"normalized_value":None,"confidence":"high","uncertainty":None,"evidence":{"exact_quote":quote}}
     base = {
+        "schema_version":"2",
         "primary_classification":"action_required","action_required":True,"summary":"A conditional review is needed.",
         "email_facts":[fact],"resource_guidance":[],"ai_suggestions":[],"missing_information":[],"execution_guidance":None,
     }
-    invalid = EmailAnalysisResult.model_validate({**base, "tasks":[{"id":"task","title":"Review the integration by tomorrow","due_at":"2026-08-15T00:00:00","due_text":"tomorrow","uncertainty":None,"evidence_ids":["ev-condition"]}]})
-    repaired = EmailAnalysisResult.model_validate({**base, "tasks":[{"id":"task","title":"Check whether the integration is affected","due_at":None,"due_text":None,"uncertainty":"Whether it is affected is unknown.","evidence_ids":["ev-condition"]}]})
+    invalid = ModelEmailAnalysisResultV2.model_validate({**base, "tasks":[{"title":"Review the integration by tomorrow","due_at":"2026-08-15T00:00:00","due_text":"tomorrow","uncertainty":None,"fact_indices":[0]}]})
+    repaired = ModelEmailAnalysisResultV2.model_validate({**base, "tasks":[{"title":"Check whether the integration is affected","due_at":None,"due_text":None,"uncertainty":"Whether it is affected is unknown.","fact_indices":[0]}]})
     client = FakeClient([invalid, repaired])
     email = SimpleNamespace(sender="sender@example.test", subject="Synthetic", body=body)
 
@@ -229,7 +328,14 @@ def test_database_failure_does_not_trigger_model_repair(db, monkeypatch):
     email = db.scalar(select(Email).where(Email.external_id == "demo-invoice"))
     email.source = "test"
     db.commit()
-    client = FakeClient(fallback_analysis(email))
+    quote = "Please approve invoice INV-2048 for USD 1,280 by July 21, 2026."
+    output = ModelEmailAnalysisResultV2.model_validate({
+        "schema_version":"2","primary_classification":"invoice","action_required":True,"summary":"Invoice approval required.",
+        "tasks":[{"title":"Approve INV-2048","due_at":"2026-07-21T00:00:00","due_text":"July 21, 2026","uncertainty":None,"fact_indices":[0]}],
+        "email_facts":[{"type":"deadline","value":"July 21, 2026","normalized_value":"2026-07-21","confidence":"high","uncertainty":None,"evidence":{"exact_quote":quote}}],
+        "resource_guidance":[],"ai_suggestions":[],"missing_information":[],"execution_guidance":model_execution_guidance(),
+    })
+    client = FakeClient(output)
 
     def fail_commit():
         raise RuntimeError("synthetic database failure")
@@ -327,19 +433,17 @@ def test_vendor_renewal_live_analysis_creates_one_dashboard_task_on_reanalysis(d
     w9_quote = "current W-9 form"
     insurance_quote = "proof of insurance"
     deadline_quote = "We need both documents by July 24, 2026."
-    w9_start = email.body.index(w9_quote)
-    insurance_start = email.body.index(insurance_quote)
-    deadline_start = email.body.index(deadline_quote)
-    output = EmailAnalysisResult.model_validate({
+    output = ModelEmailAnalysisResultV2.model_validate({
+        "schema_version":"2",
         "primary_classification":"action_required","action_required":True,
         "summary":"Current vendor-renewal documents are required by July 24, 2026.",
-        "tasks":[{"id":"vendor-renewal-task","title":"Provide vendor renewal documents","due_at":"2026-07-24T00:00:00","due_text":"2026-07-24","uncertainty":None,"evidence_ids":["fact-w9","fact-insurance","fact-deadline"]}],
+        "tasks":[{"title":"Provide vendor renewal documents","due_at":"2026-07-24T00:00:00","due_text":"2026-07-24","uncertainty":None,"fact_indices":[0,1,2]}],
         "email_facts":[
-            {"id":"fact-w9","type":"required_document","value":"current W-9 form","normalized_value":None,"confidence":"high","uncertainty":None,"evidence":{"id":"ev-w9","exact_quote":w9_quote,"start_offset":w9_start,"end_offset":w9_start+len(w9_quote)}},
-            {"id":"fact-insurance","type":"required_document","value":"proof of insurance","normalized_value":None,"confidence":"high","uncertainty":None,"evidence":{"id":"ev-insurance","exact_quote":insurance_quote,"start_offset":insurance_start,"end_offset":insurance_start+len(insurance_quote)}},
-            {"id":"fact-deadline","type":"deadline","value":"July 24, 2026","normalized_value":"2026-07-24","confidence":"high","uncertainty":None,"evidence":{"id":"ev-deadline","exact_quote":deadline_quote,"start_offset":deadline_start,"end_offset":deadline_start+len(deadline_quote)}}
+            {"type":"required_document","value":"current W-9 form","normalized_value":None,"confidence":"high","uncertainty":None,"evidence":{"exact_quote":w9_quote}},
+            {"type":"required_document","value":"proof of insurance","normalized_value":None,"confidence":"high","uncertainty":None,"evidence":{"exact_quote":insurance_quote}},
+            {"type":"deadline","value":"July 24, 2026","normalized_value":"2026-07-24","confidence":"high","uncertainty":None,"evidence":{"exact_quote":deadline_quote}}
         ],
-        "resource_guidance":[],"ai_suggestions":[],"missing_information":[],"execution_guidance":execution_guidance("fact-w9"),
+        "resource_guidance":[],"ai_suggestions":[],"missing_information":[],"execution_guidance":model_execution_guidance(0),
     })
 
     analysis = analyze_email(db, email, client=FakeClient(output))

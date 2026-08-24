@@ -8,7 +8,7 @@ from app.database import get_db
 from app.main import app
 from app.models import Analysis, Email, Task, User
 from app.openai_analysis import LiveAnalysisError, request_live_analysis, validate_evidence
-from app.schemas import EmailAnalysisResult
+from app.schemas import EmailAnalysisResult, ModelEmailAnalysisResultV2
 
 
 def _client(db, user):
@@ -113,6 +113,29 @@ def _aws_task():
     }
 
 
+def _aws_model_result(body, *, action_required=True, tasks=None, quote=None):
+    exact_quote = quote or "CloudTrail consumers may depend on the replaced Billing event names or sources."
+    return ModelEmailAnalysisResultV2.model_validate({
+        "schema_version":"2",
+        "primary_classification":"action_required",
+        "action_required":action_required,
+        "summary":"A scheduled AWS Billing API migration may affect conditional CloudTrail consumers.",
+        "tasks":tasks if tasks is not None else [{
+            "title":_aws_task()["title"],"due_at":None,"due_text":None,
+            "uncertainty":"Only update affected software if such dependencies exist.","fact_indices":[0],
+        }],
+        "email_facts":[{
+            "type":"other","value":"CloudTrail consumers may depend on replaced event names or sources",
+            "normalized_value":None,"confidence":"medium",
+            "uncertainty":"Whether the user has affected parsing, alerts, or automation is unknown.",
+            "evidence":{"exact_quote":exact_quote},
+        }],
+        "resource_guidance":[],"ai_suggestions":[],
+        "missing_information":["Whether any CloudTrail parsing, alerts, or automation depend on these events."],
+        "execution_guidance":None,
+    })
+
+
 def test_aws_semantic_inconsistencies_are_rejected():
     body = "CloudTrail consumers may depend on the replaced Billing event names or sources."
     cases = [
@@ -158,8 +181,8 @@ def test_invalid_then_valid_repair_persists_exactly_one_pair(db):
     body = "CloudTrail consumers may depend on the replaced Billing event names or sources."
     email.body = body
     db.commit()
-    invalid = _aws_result(body, action_required=True, tasks=[])
-    valid = _aws_result(body, action_required=True, tasks=[_aws_task()])
+    invalid = _aws_model_result(body, tasks=[])
+    valid = _aws_model_result(body)
     client = _SequenceClient([invalid, valid])
 
     analysis = __import__("app.analysis", fromlist=["analyze_email"]).analyze_email(db, email, client=client)
@@ -184,7 +207,7 @@ def test_failed_repair_reanalysis_restores_previous_analysis(db, monkeypatch):
     body = "CloudTrail consumers may depend on the replaced Billing event names or sources."
     email.body = body
     db.commit()
-    invalid = _aws_result(body, action_required=True, tasks=[])
+    invalid = _aws_model_result(body, tasks=[])
     repair_client = _SequenceClient([invalid, invalid])
 
     def bounded_failure(target, **kwargs):
@@ -219,8 +242,11 @@ def test_successful_repair_reanalysis_atomically_replaces_previous_pair(db, monk
     body = "CloudTrail consumers may depend on the replaced Billing event names or sources."
     email.body = body
     db.commit()
-    invalid = _aws_result(body, action_required=True, tasks=[{**_aws_task(), "evidence_ids": ["invented-link-id"]}])
-    repaired = _aws_result(body, action_required=True, tasks=[_aws_task()])
+    invalid = _aws_model_result(body, tasks=[{
+        "title":_aws_task()["title"],"due_at":None,"due_text":None,
+        "uncertainty":"Only update affected software if such dependencies exist.","fact_indices":[9],
+    }])
+    repaired = _aws_model_result(body)
     repair_client = _SequenceClient([invalid, repaired])
     monkeypatch.setattr(
         "app.analysis.request_live_analysis",

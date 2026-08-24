@@ -196,11 +196,13 @@ def _project_result(db: Session, email: Email, result: EmailAnalysisResult, sour
     if evidence is None and result.email_facts:
         evidence = result.email_facts[0].evidence
     suggestion = next((item.text for item in result.ai_suggestions if item.type == "next_step"), None)
+    structured_result = result.model_dump(mode="json")
+    structured_result["schema_version"] = result.schema_version
     analysis = Analysis(
         email=email, user_id=email.user_id, classification=result.primary_classification, action_required=bool(projected_task), summary=result.summary,
         evidence_quote=evidence.exact_quote if evidence else None, evidence_start=evidence.start_offset if evidence else None,
         evidence_end=evidence.end_offset if evidence else None, suggestion=suggestion,
-        structured_result=result.model_dump_json(), source=source, model=MODEL if source == "live_gpt" else None, error_message=error,
+        structured_result=json.dumps(structured_result), source=source, model=MODEL if source == "live_gpt" else None, error_message=error,
     )
     db.add(analysis)
     if projected_task:
