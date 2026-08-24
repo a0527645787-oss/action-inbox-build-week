@@ -317,8 +317,15 @@ def test_public_mcp_is_no_auth_read_only_and_synthetic_demo_only(db, monkeypatch
         app.dependency_overrides.clear()
 
 
-def test_gmail_page_discloses_exact_scope(db):
+def test_gmail_page_discloses_exact_scope(db, monkeypatch):
     user = _personal_user(db)
+    db.add(GmailCredential(
+        user_id=user.id,
+        account_email="pilot@example.test",
+        encrypted_token=_token(monkeypatch),
+        scopes=GMAIL_SCOPE,
+    ))
+    db.commit()
     app.dependency_overrides[get_db] = _override_db(db)
     app.dependency_overrides[get_current_user] = lambda: user
     try:
@@ -329,6 +336,18 @@ def test_gmail_page_discloses_exact_scope(db):
         assert "100 messages per page" in response.text
         assert "Not run during Gmail ingestion" in response.text
         assert "gmail-sync-progress" in response.text
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_disconnected_gmail_page_has_no_sync_progress_dom(db):
+    user = _personal_user(db)
+    app.dependency_overrides[get_db] = _override_db(db)
+    app.dependency_overrides[get_current_user] = lambda: user
+    try:
+        response = TestClient(app).get("/gmail")
+        assert response.status_code == 200
+        assert "gmail-sync-progress" not in response.text
     finally:
         app.dependency_overrides.clear()
 
