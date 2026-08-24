@@ -136,6 +136,16 @@ jobs:
                   'exit 1; fi'
               ),
               (
+                  'worker_id="$(sudo docker compose --env-file /opt/actioninbox/.env '
+                  '-f deploy/docker-compose.production.yml ps -q gmail-sync-worker)"; '
+                  'if [ -z "$worker_id" ]; then echo "Gmail sync worker is not running" >&2; exit 1; fi; '
+                  'worker_health="$(sudo docker inspect --format '
+                  "'{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "
+                  '$worker_id)"; '
+                  'if [ "$worker_health" != healthy ]; then '
+                  'echo "Gmail sync worker health check failed: $worker_health" >&2; exit 1; fi'
+              ),
+              (
                   'http_status=$(curl --silent --show-error --output /dev/null '
                   '--write-out "%{http_code}" '
                   '--resolve actioninbox.16-192-83-71.nip.io:443:127.0.0.1 '

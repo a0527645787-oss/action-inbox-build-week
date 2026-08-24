@@ -6,27 +6,31 @@ import logging
 import os
 import re
 import secrets
+import time
 import uuid
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlencode
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .auth import DEMO_USER_ID
-from .models import Analysis, Email, GmailCredential, GmailOAuthState, Task, User, utcnow
-from .triage import triage_unanalyzed_emails
+from .models import Analysis, Email, GmailCredential, GmailOAuthState, GmailSyncJob, Task, User, utcnow
 
 
 GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 OAUTH_SCOPE = f"openid email {GMAIL_SCOPE}"
 GMAIL_QUERY = "in:inbox newer_than:7d -in:spam -in:trash"
-GMAIL_MESSAGE_LIMIT = 25
-GMAIL_TASK_LIMIT = 20
+GMAIL_PAGE_SIZE = 100
+GMAIL_BOOTSTRAP_PAGE_LIMIT = 10
+GMAIL_DETAIL_CONCURRENCY = 4
+GMAIL_RETRY_LIMIT = 4
+GMAIL_JOB_LEASE_MINUTES = 5
 GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -45,15 +49,6 @@ class GmailSyncError(RuntimeError):
 
 class GmailReconnectRequired(GmailSyncError):
     pass
-
-
-@dataclass(frozen=True)
-class GmailSyncResult:
-    scope: str
-    candidates: int
-    new_messages: int
-    tasks_created: int
-    analysis_failures: int = 0
 
 
 def _required(name: str) -> str:
@@ -345,83 +340,300 @@ def _received_at(message: dict) -> datetime:
         return utcnow()
 
 
-def sync_gmail(
-    db: Session,
-    user: User,
-    credential: GmailCredential,
-    client: httpx.Client | None = None,
-) -> GmailSyncResult:
-    if (
-        user.id == DEMO_USER_ID
-        or credential.user_id != user.id
-        or GMAIL_SCOPE not in credential.scopes.split()
-    ):
+def enqueue_gmail_sync(db: Session, user: User, credential: GmailCredential) -> GmailSyncJob:
+    if user.id == DEMO_USER_ID or credential.user_id != user.id or GMAIL_SCOPE not in credential.scopes.split():
         raise GmailSyncError("Gmail credential ownership or scope is invalid")
+    active = db.scalar(
+        select(GmailSyncJob).where(
+            GmailSyncJob.credential_id == credential.id,
+            GmailSyncJob.active_slot == 1,
+        )
+    )
+    if active:
+        return active
+    job = GmailSyncJob(
+        user_id=user.id,
+        credential_id=credential.id,
+        status="queued",
+        active_slot=1,
+        mode="history" if credential.history_id else "bootstrap",
+        start_history_id=credential.history_id,
+        page_token=credential.bootstrap_page_token if not credential.history_id else None,
+    )
+    db.add(job)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        active = db.scalar(select(GmailSyncJob).where(GmailSyncJob.credential_id == credential.id, GmailSyncJob.active_slot == 1))
+        if active:
+            return active
+        raise
+    db.refresh(job)
+    return job
+
+
+def claim_gmail_sync_job(db: Session) -> GmailSyncJob | None:
+    now = utcnow()
+    candidate_id = db.scalar(
+        select(GmailSyncJob.id).where(
+            or_(
+                GmailSyncJob.status == "queued",
+                (GmailSyncJob.status == "running") & (GmailSyncJob.lease_expires_at < now),
+            )
+        ).order_by(GmailSyncJob.id).limit(1)
+    )
+    if candidate_id is None:
+        return None
+    claimed = db.execute(
+        update(GmailSyncJob).where(
+            GmailSyncJob.id == candidate_id,
+            or_(
+                GmailSyncJob.status == "queued",
+                (GmailSyncJob.status == "running") & (GmailSyncJob.lease_expires_at < now),
+            ),
+        ).values(
+            status="running",
+            started_at=now,
+            heartbeat_at=now,
+            lease_expires_at=now + timedelta(minutes=GMAIL_JOB_LEASE_MINUTES),
+            attempts=GmailSyncJob.attempts + 1,
+        )
+    )
+    db.commit()
+    if claimed.rowcount != 1:
+        return None
+    return db.get(GmailSyncJob, candidate_id)
+
+
+def _retry_after_seconds(response, attempt: int) -> float:
+    value = getattr(response, "headers", {}).get("Retry-After") if response is not None else None
+    try:
+        return min(max(float(value), 0.0), 30.0)
+    except (TypeError, ValueError):
+        return min(2 ** attempt, 8)
+
+
+def _gmail_get(client: httpx.Client, url: str, headers: dict, params: dict | None = None):
+    for attempt in range(GMAIL_RETRY_LIMIT):
+        response = None
+        try:
+            response = client.get(url, headers=headers, params=params)
+            status = response.status_code
+            if status in {401, 403}:
+                raise GmailReconnectRequired("Gmail authorization expired; reconnect Gmail")
+            if status == 404 and url.endswith("/history"):
+                raise GmailHistoryExpired("Gmail history cursor expired")
+            if status != 429 and status < 500:
+                response.raise_for_status()
+                return response
+            if attempt + 1 == GMAIL_RETRY_LIMIT:
+                response.raise_for_status()
+        except (GmailReconnectRequired, GmailHistoryExpired):
+            raise
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status != 429 and status < 500:
+                raise GmailSyncError("Gmail request was rejected") from exc
+            if attempt + 1 == GMAIL_RETRY_LIMIT:
+                raise
+        except (httpx.TimeoutException, httpx.NetworkError):
+            if attempt + 1 == GMAIL_RETRY_LIMIT:
+                raise
+        time.sleep(_retry_after_seconds(response, attempt))
+    raise GmailSyncError("Gmail retry limit exhausted")
+
+
+class GmailHistoryExpired(GmailSyncError):
+    pass
+
+
+def _history_message_ids(data: dict) -> list[str]:
+    ids = []
+    for event in data.get("history", []):
+        for addition in event.get("messagesAdded", []):
+            message_id = addition.get("message", {}).get("id")
+            if message_id:
+                ids.append(message_id)
+    return list(dict.fromkeys(ids))
+
+
+def _fetch_detail(client, headers, message_id):
+    try:
+        response = _gmail_get(client, f"{GMAIL_API}/messages/{message_id}", headers, {"format": "full"})
+        return message_id, response.json(), None
+    except GmailReconnectRequired:
+        raise
+    except Exception as exc:
+        return message_id, None, "MESSAGE_FETCH_FAILED"
+
+
+def _heartbeat(job: GmailSyncJob) -> None:
+    now = utcnow()
+    job.heartbeat_at = now
+    job.lease_expires_at = now + timedelta(minutes=GMAIL_JOB_LEASE_MINUTES)
+
+
+def _store_page(db: Session, job: GmailSyncJob, messages: list[dict | None], message_ids: list[str]) -> None:
+    existing = set(db.scalars(select(Email.gmail_message_id).where(Email.user_id == job.user_id, Email.gmail_message_id.in_(message_ids))).all())
+    for message in messages:
+        if not message:
+            continue
+        try:
+            message_id = message.get("id")
+            if not message_id:
+                job.failures += 1
+                continue
+            if message_id in existing:
+                job.duplicates += 1
+                continue
+            labels = set(message.get("labelIds", []))
+            if "INBOX" not in labels or labels.intersection({"SPAM", "TRASH"}):
+                job.skipped += 1
+                continue
+            body = _body(message.get("payload", {})).strip()[:20000]
+            if not body:
+                job.skipped += 1
+                continue
+            email = Email(
+                user_id=job.user_id,
+                external_id=f"gmail:{message_id}",
+                gmail_message_id=message_id,
+                gmail_thread_id=message.get("threadId"),
+                sender=_header(message, "From")[:255] or "Unknown sender",
+                subject=_header(message, "Subject")[:255] or "(no subject)",
+                received_at=_received_at(message),
+                body=body,
+                source="gmail",
+                analyzed=False,
+            )
+        except Exception:
+            job.failures += 1
+            continue
+        try:
+            with db.begin_nested():
+                db.add(email)
+                db.flush()
+            existing.add(message_id)
+            job.imported += 1
+        except IntegrityError:
+            job.duplicates += 1
+
+
+def _finish_job(db: Session, job: GmailSyncJob, credential: GmailCredential, status: str, safe_error: str | None = None) -> None:
+    job.status = status
+    job.safe_error = safe_error
+    job.active_slot = None
+    job.completed_at = utcnow()
+    job.lease_expires_at = None
+    if status in {"succeeded", "partial"}:
+        credential.last_synced_at = utcnow()
+    db.commit()
+
+
+def run_gmail_sync_job(db: Session, job: GmailSyncJob, client: httpx.Client | None = None) -> None:
+    credential = db.get(GmailCredential, job.credential_id)
+    if not credential or credential.user_id != job.user_id or GMAIL_SCOPE not in credential.scopes.split():
+        _finish_job(db, job, credential, "failed", "CREDENTIAL_UNAVAILABLE") if credential else _fail_orphan_job(db, job)
+        return
     owned = client or httpx.Client(timeout=30)
     try:
         access_token = _access_token(credential, owned)
         headers = {"Authorization": f"Bearer {access_token}"}
-        response = owned.get(f"{GMAIL_API}/messages", headers=headers, params={"labelIds": "INBOX", "q": GMAIL_QUERY, "maxResults": GMAIL_MESSAGE_LIMIT})
-        response.raise_for_status()
-        candidates = response.json().get("messages", [])[:GMAIL_MESSAGE_LIMIT]
-        existing_by_id = {
-            email.gmail_message_id: email
-            for email in db.scalars(
-                select(Email).where(Email.user_id == user.id, Email.gmail_message_id.is_not(None))
-            ).all()
-        }
-        imported = 0
-        email_ids_to_analyze: list[int] = []
-        for item in candidates:
-            message_id = item.get("id")
-            if not message_id:
-                continue
-            email = existing_by_id.get(message_id)
-            if email is not None and email.analyzed and email.analysis is not None:
-                continue
-            if email is None:
-                detail = owned.get(f"{GMAIL_API}/messages/{message_id}", headers=headers, params={"format": "full"})
-                detail.raise_for_status(); message = detail.json()
-                labels = set(message.get("labelIds", []))
-                if "INBOX" not in labels or labels.intersection({"SPAM", "TRASH"}):
+        pages_this_run = 0
+        while True:
+            _heartbeat(job)
+            db.commit()
+            if job.mode == "history" and credential.history_id:
+                params = {"startHistoryId": job.start_history_id or credential.history_id, "historyTypes": "messageAdded", "labelId": "INBOX", "maxResults": GMAIL_PAGE_SIZE}
+                if job.page_token:
+                    params["pageToken"] = job.page_token
+                try:
+                    listing = _gmail_get(owned, f"{GMAIL_API}/history", headers, params).json()
+                except GmailHistoryExpired:
+                    credential.history_id = None
+                    credential.bootstrap_page_token = None
+                    job.mode = "bootstrap"
+                    job.start_history_id = None
+                    job.page_token = None
+                    job.safe_error = "HISTORY_CURSOR_EXPIRED"
+                    db.commit()
                     continue
-                body = _body(message.get("payload", {})).strip()[:20000]
-                if not body:
-                    continue
-                email = Email(user_id=user.id, external_id=f"gmail:{message_id}", gmail_message_id=message_id,
-                              gmail_thread_id=message.get("threadId"), sender=_header(message, "From")[:255] or "Unknown sender",
-                              subject=_header(message, "Subject")[:255] or "(no subject)", received_at=_received_at(message),
-                              body=body, source="gmail", analyzed=False)
-                db.add(email); db.commit(); db.refresh(email)
-                existing_by_id[message_id] = email
-                imported += 1
-            email_ids_to_analyze.append(email.id)
-        triage = triage_unanalyzed_emails(
-            db,
-            user.id,
-            email_ids=email_ids_to_analyze,
-            source="gmail",
-            continue_on_error=True,
-            max_tasks=GMAIL_TASK_LIMIT,
-        )
-        credential.last_synced_at = utcnow()
-        db.commit()
-        return GmailSyncResult(
-            GMAIL_QUERY,
-            len(candidates),
-            imported,
-            triage.tasks_created,
-            triage.failures,
-        )
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code in {401, 403}:
-            raise GmailReconnectRequired("Gmail authorization expired; reconnect Gmail") from exc
-        raise GmailSyncError("Gmail read-only sync failed") from exc
-    except httpx.HTTPError as exc:
-        raise GmailSyncError("Gmail read-only sync failed") from exc
+                message_ids = _history_message_ids(listing)
+            else:
+                params = {"labelIds": "INBOX", "q": GMAIL_QUERY, "maxResults": GMAIL_PAGE_SIZE}
+                token = job.page_token or credential.bootstrap_page_token
+                if token:
+                    params["pageToken"] = token
+                listing = _gmail_get(owned, f"{GMAIL_API}/messages", headers, params).json()
+                message_ids = list(dict.fromkeys(item.get("id") for item in listing.get("messages", []) if item.get("id")))
+            job.pages_listed += 1
+            job.candidates += len(message_ids)
+            existing_ids = set(db.scalars(
+                select(Email.gmail_message_id).where(
+                    Email.user_id == job.user_id,
+                    Email.gmail_message_id.in_(message_ids),
+                )
+            ).all()) if message_ids else set()
+            job.duplicates += len(existing_ids)
+            fetch_ids = [message_id for message_id in message_ids if message_id not in existing_ids]
+            failures = 0
+            details = []
+            with ThreadPoolExecutor(max_workers=GMAIL_DETAIL_CONCURRENCY) as pool:
+                futures = [pool.submit(_fetch_detail, owned, headers, message_id) for message_id in fetch_ids]
+                for future in as_completed(futures):
+                    _, message, error = future.result()
+                    if error:
+                        failures += 1
+                    details.append(message)
+            job.details_fetched += len(fetch_ids) - failures
+            job.failures += failures
+            _store_page(db, job, details, fetch_ids)
+            next_token = listing.get("nextPageToken")
+            job.page_token = next_token
+            job.pending_history_id = listing.get("historyId") or job.pending_history_id
+            _heartbeat(job)
+            db.commit()
+            pages_this_run += 1
+            if next_token and job.mode == "bootstrap" and pages_this_run >= GMAIL_BOOTSTRAP_PAGE_LIMIT:
+                credential.bootstrap_page_token = next_token
+                job.status = "queued"
+                job.safe_error = None
+                job.lease_expires_at = None
+                db.commit()
+                return
+            if not next_token:
+                break
+        if job.mode == "bootstrap":
+            profile = _gmail_get(owned, f"{GMAIL_API}/profile", headers).json()
+            credential.history_id = str(profile.get("historyId")) if profile.get("historyId") else None
+            credential.bootstrap_page_token = None
+        elif job.pending_history_id:
+            credential.history_id = job.pending_history_id
+        _finish_job(db, job, credential, "partial" if job.failures else "succeeded", "MESSAGE_FAILURES" if job.failures else None)
+    except GmailReconnectRequired:
+        db.rollback()
+        job = db.get(GmailSyncJob, job.id)
+        credential = db.get(GmailCredential, job.credential_id)
+        _finish_job(db, job, credential, "failed", "RECONNECT_REQUIRED")
+    except Exception as exc:
+        db.rollback()
+        job = db.get(GmailSyncJob, job.id)
+        credential = db.get(GmailCredential, job.credential_id)
+        _finish_job(db, job, credential, "failed", "GMAIL_SYNC_FAILED")
+        logger.error("Gmail sync worker failed job_id=%s exception_class=%s", job.id, type(exc).__name__)
     finally:
         if client is None:
             owned.close()
+
+
+def _fail_orphan_job(db: Session, job: GmailSyncJob) -> None:
+    job.status = "failed"
+    job.safe_error = "CREDENTIAL_UNAVAILABLE"
+    job.active_slot = None
+    job.completed_at = utcnow()
+    job.lease_expires_at = None
+    db.commit()
 
 
 def disconnect_gmail(

@@ -3,6 +3,7 @@ import base64
 
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
+import httpx
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -14,17 +15,19 @@ from app.gmail import (
     GMAIL_QUERY,
     GMAIL_SCOPE,
     GmailSyncError,
+    claim_gmail_sync_job,
     complete_oauth,
+    enqueue_gmail_sync,
     encrypt_tokens,
-    sync_gmail,
+    run_gmail_sync_job,
 )
 from app.main import app
-from app.models import Analysis, Email, GmailCredential, GmailOAuthState, Task, User, utcnow
+from app.models import Analysis, Email, GmailCredential, GmailOAuthState, GmailSyncJob, Task, User, utcnow
 from app.triage import triage_unanalyzed_emails
 
 
 class FakeResponse:
-    def __init__(self, data, status=200): self.data, self.status_code = data, status
+    def __init__(self, data, status=200, headers=None): self.data, self.status_code, self.headers = data, status, headers or {}
     def json(self): return self.data
     def raise_for_status(self):
         if self.status_code >= 400: raise RuntimeError("HTTP failure")
@@ -34,6 +37,8 @@ class GmailClient:
     def __init__(self): self.calls = []
     def get(self, url, headers=None, params=None):
         self.calls.append(("GET", url, params))
+        if url.endswith("/profile"):
+            return FakeResponse({"historyId": "history-2"})
         if url.endswith("/messages"):
             return FakeResponse({"messages": [{"id": "gmail-1", "threadId": "thread-1"}]})
         body = "For vendor renewal, please send your current W-9 form and proof of insurance. We need both documents by July 24, 2026."
@@ -102,28 +107,26 @@ def _oauth_state(db, state):
     db.commit()
 
 
-def test_gmail_sync_is_bounded_read_only_and_idempotent(db, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    monkeypatch.setattr(
-        "app.analysis.request_live_analysis",
-        lambda email, client=None, resources=None: fallback_analysis(email, resources),
-    )
+def test_gmail_sync_job_is_read_only_ingestion_and_idempotent(db, monkeypatch):
     user = _personal_user(db)
     credential = GmailCredential(user_id=user.id, account_email="pilot@example.test", encrypted_token=_token(monkeypatch), scopes=GMAIL_SCOPE)
     db.add(credential); db.commit()
     client = GmailClient()
-    first = sync_gmail(db, user, credential, client=client)
-    assert first.scope == GMAIL_QUERY
-    assert (first.candidates, first.new_messages, first.tasks_created) == (1, 1, 1)
+    job = enqueue_gmail_sync(db, user, credential)
+    assert enqueue_gmail_sync(db, user, credential).id == job.id
+    run_gmail_sync_job(db, job, client=client)
+    db.refresh(job)
+    assert job.status == "succeeded" and job.imported == 1
     list_call = client.calls[0]
-    assert list_call[2] == {"labelIds": "INBOX", "q": GMAIL_QUERY, "maxResults": 25}
+    assert list_call[2] == {"labelIds": "INBOX", "q": GMAIL_QUERY, "maxResults": 100}
     assert all(method == "GET" for method, _, _ in client.calls)
     email = db.scalar(select(Email).where(Email.gmail_message_id == "gmail-1"))
-    assert email and email.source == "gmail"
-    second = sync_gmail(db, user, credential, client=client)
-    assert second.new_messages == 0 and second.tasks_created == 0
+    assert email and email.source == "gmail" and email.analyzed is False
+    assert email.analysis is None and email.task is None
+    second = enqueue_gmail_sync(db, user, credential)
+    run_gmail_sync_job(db, second, client=client)
     assert db.scalar(select(func.count()).select_from(Email).where(Email.gmail_message_id == "gmail-1")) == 1
-    assert db.scalar(select(func.count()).select_from(Task).where(Task.email_id == email.id)) == 1
+    assert db.scalar(select(func.count()).select_from(Task).where(Task.email_id == email.id)) == 0
 
     duplicate = Email(user_id=user.id, external_id="gmail:duplicate", gmail_message_id="gmail-1",
                       sender="x", subject="x", received_at=datetime.now(UTC).replace(tzinfo=None), body="x")
@@ -135,35 +138,107 @@ def test_gmail_sync_is_bounded_read_only_and_idempotent(db, monkeypatch):
         db.rollback()
 
 
-def test_gmail_timeout_is_retained_and_successful_retry_does_not_duplicate(db, monkeypatch):
-    from app.openai_analysis import LiveAnalysisError
-
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+def test_gmail_sync_route_returns_202_and_same_active_job(db, monkeypatch):
     user = _personal_user(db)
     credential = GmailCredential(user_id=user.id, account_email="pilot@example.test",
                                  encrypted_token=_token(monkeypatch), scopes=GMAIL_SCOPE)
     db.add(credential); db.commit()
-    client = GmailClient()
+    app.dependency_overrides[get_db] = _override_db(db)
+    app.dependency_overrides[get_current_user] = lambda: user
+    try:
+        client = TestClient(app)
+        first = client.post("/gmail/sync")
+        second = client.post("/gmail/sync")
+        assert first.status_code == 202 and second.status_code == 202
+        assert first.json()["job_id"] == second.json()["job_id"]
+        assert first.headers["location"] == first.json()["status_url"]
+        status = client.get(first.json()["status_url"])
+        assert status.status_code == 200 and status.json()["status"] == "queued"
+    finally:
+        app.dependency_overrides.clear()
 
-    def timeout(*args, **kwargs):
-        raise LiveAnalysisError("OpenAI analysis failed")
 
-    monkeypatch.setattr("app.analysis.request_live_analysis", timeout)
-    first = sync_gmail(db, user, credential, client=client)
-    assert (first.new_messages, first.tasks_created, first.analysis_failures) == (1, 0, 1)
-    email = db.scalar(select(Email).where(Email.gmail_message_id == "gmail-1"))
-    assert email is not None and email.analyzed is False and email.analysis is None and email.task is None
+def test_gmail_worker_paginates_then_uses_history_cursor(db, monkeypatch):
+    class PagedClient(GmailClient):
+        def get(self, url, headers=None, params=None):
+            self.calls.append(("GET", url, params))
+            if url.endswith("/messages"):
+                if params.get("pageToken") == "page-2":
+                    return FakeResponse({"messages": [{"id": "gmail-2"}]})
+                return FakeResponse({"messages": [{"id": "gmail-1"}], "nextPageToken": "page-2"})
+            if url.endswith("/history"):
+                return FakeResponse({"historyId": "history-3", "history": [{"messagesAdded": [{"message": {"id": "gmail-3"}}]}]})
+            if url.endswith("/profile"):
+                return FakeResponse({"historyId": "history-2"})
+            message_id = url.rsplit("/", 1)[-1]
+            body = f"Synthetic read-only Gmail message {message_id}."
+            encoded = base64.urlsafe_b64encode(body.encode()).decode().rstrip("=")
+            return FakeResponse({"id": message_id, "threadId": "thread", "labelIds": ["INBOX"], "internalDate": "1784682000000",
+                "payload": {"mimeType": "text/plain", "body": {"data": encoded}, "headers": []}})
 
-    monkeypatch.setattr(
-        "app.analysis.request_live_analysis",
-        lambda target, client=None, resources=None: fallback_analysis(target, resources),
-    )
-    second = sync_gmail(db, user, credential, client=client)
-    assert (second.new_messages, second.tasks_created, second.analysis_failures) == (0, 1, 0)
-    third = sync_gmail(db, user, credential, client=client)
-    assert (third.new_messages, third.tasks_created, third.analysis_failures) == (0, 0, 0)
-    assert db.scalar(select(func.count()).select_from(Email).where(Email.gmail_message_id == "gmail-1")) == 1
-    assert db.scalar(select(func.count()).select_from(Task).where(Task.email_id == email.id)) == 1
+    user = _personal_user(db)
+    credential = GmailCredential(user_id=user.id, account_email="pilot@example.test", encrypted_token=_token(monkeypatch), scopes=GMAIL_SCOPE)
+    db.add(credential); db.commit()
+    client = PagedClient()
+    bootstrap = enqueue_gmail_sync(db, user, credential)
+    run_gmail_sync_job(db, bootstrap, client=client)
+    db.refresh(credential); db.refresh(bootstrap)
+    assert bootstrap.pages_listed == 2 and bootstrap.imported == 2
+    assert credential.history_id == "history-2"
+
+    incremental = enqueue_gmail_sync(db, user, credential)
+    assert incremental.mode == "history" and incremental.start_history_id == "history-2"
+    run_gmail_sync_job(db, incremental, client=client)
+    db.refresh(credential)
+    assert credential.history_id == "history-3"
+    assert db.scalar(select(func.count()).select_from(Email).where(Email.user_id == user.id)) == 3
+    history_calls = [call for call in client.calls if call[1].endswith("/history")]
+    assert history_calls[0][2]["startHistoryId"] == "history-2"
+
+
+def test_expired_worker_lease_is_recoverably_claimed(db, monkeypatch):
+    user = _personal_user(db)
+    credential = GmailCredential(user_id=user.id, account_email="pilot@example.test", encrypted_token=_token(monkeypatch), scopes=GMAIL_SCOPE)
+    db.add(credential); db.commit()
+    job = enqueue_gmail_sync(db, user, credential)
+    job.status = "running"
+    job.lease_expires_at = utcnow() - timedelta(seconds=1)
+    db.commit()
+    claimed = claim_gmail_sync_job(db)
+    assert claimed.id == job.id
+    assert claimed.status == "running" and claimed.attempts == 1
+    assert claimed.heartbeat_at is not None and claimed.lease_expires_at > claimed.heartbeat_at
+
+
+def test_transient_detail_failure_is_bounded_and_isolated(db, monkeypatch):
+    class IsolatedFailureClient(GmailClient):
+        def __init__(self):
+            super().__init__()
+            self.failed_attempts = 0
+
+        def get(self, url, headers=None, params=None):
+            if url.endswith("/messages"):
+                return FakeResponse({"messages": [{"id": "gmail-good"}, {"id": "gmail-fail"}]})
+            if url.endswith("/profile"):
+                return FakeResponse({"historyId": "history-2"})
+            if url.endswith("gmail-fail"):
+                self.failed_attempts += 1
+                return httpx.Response(503, request=httpx.Request("GET", url))
+            message_id = url.rsplit("/", 1)[-1]
+            encoded = base64.urlsafe_b64encode(b"Safe body").decode().rstrip("=")
+            return FakeResponse({"id": message_id, "labelIds": ["INBOX"], "payload": {"mimeType": "text/plain", "body": {"data": encoded}, "headers": []}})
+
+    monkeypatch.setattr("app.gmail.time.sleep", lambda _: None)
+    user = _personal_user(db)
+    credential = GmailCredential(user_id=user.id, account_email="pilot@example.test", encrypted_token=_token(monkeypatch), scopes=GMAIL_SCOPE)
+    db.add(credential); db.commit()
+    client = IsolatedFailureClient()
+    job = enqueue_gmail_sync(db, user, credential)
+    run_gmail_sync_job(db, job, client=client)
+    db.refresh(job)
+    assert job.status == "partial" and job.imported == 1 and job.failures == 1
+    assert job.safe_error == "MESSAGE_FAILURES" and client.failed_attempts == 4
+    assert db.scalar(select(Email).where(Email.gmail_message_id == "gmail-good")).analyzed is False
 
 
 def test_supported_synthetic_email_still_uses_deterministic_fallback(db, monkeypatch):
@@ -251,7 +326,9 @@ def test_gmail_page_discloses_exact_scope(db):
         assert response.status_code == 200
         assert GMAIL_QUERY in response.text
         assert GMAIL_SCOPE in response.text
-        assert "25 per sync" in response.text and "20 newly created tasks" in response.text
+        assert "100 messages per page" in response.text
+        assert "Not run during Gmail ingestion" in response.text
+        assert "gmail-sync-progress" in response.text
     finally:
         app.dependency_overrides.clear()
 

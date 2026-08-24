@@ -14,17 +14,79 @@
   <dl>
     <div><dt>Mailbox</dt><dd>INBOX only</dd></div>
     <div><dt>Search</dt><dd><code>{{ query }}</code></dd></div>
-    <div><dt>Message cap</dt><dd>{{ message_limit }} per sync</dd></div>
-    <div><dt>Task cap</dt><dd>{{ task_limit }} newly created tasks</dd></div>
+    <div><dt>Pagination</dt><dd>{{ page_size }} messages per page; bootstrap checkpoints every {{ bootstrap_page_limit }} pages</dd></div>
+    <div><dt>Detail fetches</dt><dd>Up to {{ detail_concurrency }} concurrent read-only requests</dd></div>
+    <div><dt>Analysis</dt><dd>Not run during Gmail ingestion</dd></div>
     <div><dt>OAuth scope</dt><dd><code>{{ scope }}</code></dd></div>
   </dl>
   {% if credential %}
   <p class="connected"><strong>Connected:</strong> {{ credential.account_email }}</p>
-  <form method="post" action="/gmail/sync"><button class="button" type="submit">Check for new emails</button></form>
+  <form id="gmail-sync-form" method="post" action="/gmail/sync">
+    <button id="gmail-sync-button" class="button" type="submit"{% if latest_job and latest_job.active_slot %} disabled{% endif %}>{% if latest_job and latest_job.active_slot %}Sync in progress…{% else %}Check for new emails{% endif %}</button>
+  </form>
   {% elif not configured %}
   <p class="notice">Gmail OAuth is not configured on this server. The safe demo remains available.</p>
   {% endif %}
 </section>
+{% if credential %}
+<section id="gmail-sync-progress" class="card" data-status-url="{% if latest_job %}/gmail/sync/{{ latest_job.id }}{% endif %}">
+  <h2>Sync progress</h2>
+  <p id="gmail-sync-status">{% if latest_job %}{{ latest_job.status }}{% else %}No sync requested yet{% endif %}</p>
+  <p id="gmail-sync-counts"></p>
+</section>
+<script>
+(() => {
+  const form = document.getElementById('gmail-sync-form');
+  const button = document.getElementById('gmail-sync-button');
+  const panel = document.getElementById('gmail-sync-progress');
+  const statusNode = document.getElementById('gmail-sync-status');
+  const countsNode = document.getElementById('gmail-sync-counts');
+  if (!form || !button || !panel || !statusNode || !countsNode) return;
+  let timer = null;
+  const terminal = new Set(['succeeded', 'partial', 'failed']);
+  const render = (job) => {
+    statusNode.textContent = job.status;
+    countsNode.textContent = `${job.pages_listed} pages; ${job.candidates} candidates; ${job.imported} imported; ${job.duplicates} duplicates; ${job.skipped} skipped; ${job.failures} failed.`;
+    const active = !terminal.has(job.status);
+    button.disabled = active;
+    button.textContent = active ? 'Sync in progress…' : 'Check for new emails';
+    if (!active && timer) { clearInterval(timer); timer = null; }
+  };
+  const poll = async () => {
+    const url = panel.dataset.statusUrl;
+    if (!url) return;
+    try {
+      const response = await fetch(url, {headers: {'Accept': 'application/json'}});
+      if (response.ok) render(await response.json());
+    } catch (_) {}
+  };
+  const beginPolling = () => {
+    poll();
+    if (!timer) timer = setInterval(poll, 2000);
+  };
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (button.disabled) return;
+    button.disabled = true;
+    button.textContent = 'Starting…';
+    try {
+      const response = await fetch(form.action, {method: 'POST', headers: {'Accept': 'application/json'}});
+      if (response.status !== 202) throw new Error('queue failed');
+      const job = await response.json();
+      panel.dataset.statusUrl = job.status_url;
+      statusNode.textContent = job.status;
+      button.textContent = 'Sync in progress…';
+      beginPolling();
+    } catch (_) {
+      button.disabled = false;
+      button.textContent = 'Check for new emails';
+      statusNode.textContent = 'Sync could not be queued safely.';
+    }
+  });
+  if (panel.dataset.statusUrl) beginPolling();
+})();
+</script>
+{% endif %}
 {% if credential %}
 <section class="card">
   <h2>Connection controls</h2>
@@ -37,11 +99,5 @@
 {% endif %}
 {% if sync_error %}
 <section class="card notice"><p>Gmail sync could not be completed safely. No mailbox changes were made. Please try again.</p></section>
-{% endif %}
-{% if candidates or imported or tasks_created or failures %}
-<section class="card result-banner">
-  <h2>Last manual sync result</h2>
-  <p><strong>{{ candidates }}</strong> candidates in scope; <strong>{{ imported }}</strong> new messages imported; <strong>{{ tasks_created }}</strong> actionable tasks created; <strong>{{ failures }}</strong> analysis failures retained for safe retry.</p>
-</section>
 {% endif %}
 {% endblock %}

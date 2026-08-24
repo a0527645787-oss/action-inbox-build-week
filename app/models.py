@@ -156,8 +156,41 @@ class GmailCredential(Base):
     encrypted_token: Mapped[str] = mapped_column(Text)
     scopes: Mapped[str] = mapped_column(Text)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    history_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    bootstrap_page_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class GmailSyncJob(Base):
+    __tablename__ = "gmail_sync_jobs"
+    __table_args__ = (
+        UniqueConstraint("credential_id", "active_slot", name="uq_gmail_sync_active_credential"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    credential_id: Mapped[int] = mapped_column(ForeignKey("gmail_credentials.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    active_slot: Mapped[int | None] = mapped_column(Integer, default=1, nullable=True)
+    mode: Mapped[str] = mapped_column(String(30), default="bootstrap")
+    page_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    start_history_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    pending_history_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    pages_listed: Mapped[int] = mapped_column(Integer, default=0)
+    candidates: Mapped[int] = mapped_column(Integer, default=0)
+    details_fetched: Mapped[int] = mapped_column(Integer, default=0)
+    imported: Mapped[int] = mapped_column(Integer, default=0)
+    duplicates: Mapped[int] = mapped_column(Integer, default=0)
+    skipped: Mapped[int] = mapped_column(Integer, default=0)
+    failures: Mapped[int] = mapped_column(Integer, default=0)
+    safe_error: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class GmailOAuthState(Base):

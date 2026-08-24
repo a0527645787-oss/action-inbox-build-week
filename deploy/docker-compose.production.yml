@@ -61,6 +61,29 @@ services:
     networks:
       - backend
 
+  gmail-sync-worker:
+    build:
+      context: ..
+    command: ["python", "-m", "app.gmail_sync_worker"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: mysql+pymysql://${MYSQL_USER:?MYSQL_USER is required}:${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}@mysql:3306/${MYSQL_DATABASE:?MYSQL_DATABASE is required}?charset=utf8mb4
+      GMAIL_CLIENT_ID: ${GMAIL_CLIENT_ID:?GMAIL_CLIENT_ID is required}
+      GMAIL_CLIENT_SECRET: ${GMAIL_CLIENT_SECRET:?GMAIL_CLIENT_SECRET is required}
+      GMAIL_REDIRECT_URI: https://actioninboxapp.com/auth/google/callback
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:?TOKEN_ENCRYPTION_KEY is required}
+    depends_on:
+      actioninbox:
+        condition: service_healthy
+    networks:
+      - backend
+      - frontend
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   nginx:
     image: nginx:1.27-alpine
     restart: unless-stopped

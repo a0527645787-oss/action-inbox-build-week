@@ -39,20 +39,20 @@ from .agent_execution import (
 )
 from .execution import PACKAGE_EXECUTORS, build_execution_package, package_as_text, parse_structured_result
 from .gmail import (
-    GMAIL_MESSAGE_LIMIT,
+    GMAIL_BOOTSTRAP_PAGE_LIMIT,
+    GMAIL_DETAIL_CONCURRENCY,
+    GMAIL_PAGE_SIZE,
     GMAIL_QUERY,
     GMAIL_SCOPE,
-    GMAIL_TASK_LIMIT,
-    GmailReconnectRequired,
     GmailSyncError,
     begin_oauth,
     complete_oauth,
     disconnect_gmail,
+    enqueue_gmail_sync,
     gmail_configured,
-    sync_gmail,
 )
 from .mcp import handle_mcp
-from .models import BusinessResource, Email, Execution, ExecutionEvent, GmailCredential, Task, User, utcnow
+from .models import BusinessResource, Email, Execution, ExecutionEvent, GmailCredential, GmailSyncJob, Task, User, utcnow
 from .resources import MAX_RESOURCE_CHARS, RESOURCE_TYPES, seed_demo_resources
 from .triage import triage_unanalyzed_emails
 
@@ -130,15 +130,18 @@ def inbox(request: Request, db: Session = Depends(get_db), current_user: User = 
 
 
 @app.get("/gmail")
-def gmail_page(request: Request, candidates: int = 0, imported: int = 0, tasks_created: int = 0, failures: int = 0,
-               reconnect: int = 0, sync_error: int = 0, db: Session = Depends(get_db),
+def gmail_page(request: Request, reconnect: int = 0, sync_error: int = 0, db: Session = Depends(get_db),
                current_user: User = Depends(require_personal_user)):
     credential = db.scalar(select(GmailCredential).where(GmailCredential.user_id == current_user.id).order_by(GmailCredential.updated_at.desc()))
+    latest_job = db.scalar(select(GmailSyncJob).where(
+        GmailSyncJob.user_id == current_user.id,
+        GmailSyncJob.credential_id == credential.id,
+    ).order_by(GmailSyncJob.id.desc())) if credential else None
     return templates.TemplateResponse(request, "gmail.html", {"credential": credential, "configured": gmail_configured(),
-        "scope": GMAIL_SCOPE, "query": GMAIL_QUERY, "message_limit": GMAIL_MESSAGE_LIMIT, "task_limit": GMAIL_TASK_LIMIT,
-        "candidates": max(candidates, 0), "imported": max(imported, 0), "tasks_created": max(tasks_created, 0),
-        "failures": max(failures, 0), "reconnect": bool(reconnect), "sync_error": bool(sync_error),
-        "current_user": current_user})
+        "scope": GMAIL_SCOPE, "query": GMAIL_QUERY, "page_size": GMAIL_PAGE_SIZE,
+        "bootstrap_page_limit": GMAIL_BOOTSTRAP_PAGE_LIMIT, "detail_concurrency": GMAIL_DETAIL_CONCURRENCY,
+        "reconnect": bool(reconnect), "sync_error": bool(sync_error),
+        "latest_job": latest_job, "current_user": current_user})
 
 
 @app.get("/gmail/status")
@@ -195,19 +198,32 @@ def gmail_sync(db: Session = Depends(get_db), current_user: User = Depends(requi
     if not credential:
         raise HTTPException(409, "Connect Gmail before syncing")
     try:
-        result = sync_gmail(db, current_user, credential)
-    except GmailReconnectRequired:
-        db.delete(credential)
-        db.commit()
-        return RedirectResponse("/gmail?reconnect=1", 303)
+        job = enqueue_gmail_sync(db, current_user, credential)
     except GmailSyncError as exc:
-        logger.exception(
-            "Gmail sync failed user_fingerprint=%s exception_class=%s",
-            hashlib.sha256(current_user.id.encode()).hexdigest()[:12],
-            type(exc).__name__,
-        )
-        return RedirectResponse("/gmail?sync_error=1", 303)
-    return RedirectResponse(f"/gmail?candidates={result.candidates}&imported={result.new_messages}&tasks_created={result.tasks_created}&failures={result.analysis_failures}", 303)
+        raise HTTPException(409, "Gmail sync could not be queued safely") from exc
+    status_url = f"/gmail/sync/{job.id}"
+    return JSONResponse({"job_id": job.id, "status": job.status, "status_url": status_url}, status_code=202, headers={"Location": status_url})
+
+
+@app.get("/gmail/sync/{job_id}")
+def gmail_sync_status(job_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_personal_user)):
+    job = db.scalar(select(GmailSyncJob).where(GmailSyncJob.id == job_id, GmailSyncJob.user_id == current_user.id))
+    if not job:
+        raise HTTPException(404, "Gmail sync job not found")
+    return JSONResponse({
+        "id": job.id,
+        "status": job.status,
+        "mode": job.mode,
+        "pages_listed": job.pages_listed,
+        "candidates": job.candidates,
+        "details_fetched": job.details_fetched,
+        "imported": job.imported,
+        "duplicates": job.duplicates,
+        "skipped": job.skipped,
+        "failures": job.failures,
+        "safe_error": job.safe_error,
+        "updated_at": (job.heartbeat_at or job.created_at).isoformat(),
+    })
 
 
 @app.post("/gmail/disconnect")

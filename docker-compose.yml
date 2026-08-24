@@ -28,6 +28,20 @@ services:
     depends_on:
       actioninbox:
         condition: service_healthy
+  gmail-sync-worker:
+    build: .
+    command: ["python", "-m", "app.gmail_sync_worker"]
+    environment:
+      DATABASE_URL: sqlite:////data/actioninbox.db
+      GMAIL_CLIENT_ID: ${GMAIL_CLIENT_ID:-}
+      GMAIL_CLIENT_SECRET: ${GMAIL_CLIENT_SECRET:-}
+      GMAIL_REDIRECT_URI: ${GMAIL_REDIRECT_URI:-http://localhost:8000/auth/google/callback}
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
+    volumes:
+      - actioninbox_data:/data
+    depends_on:
+      actioninbox:
+        condition: service_healthy
   mysql:
     image: mysql:8.4
     profiles: ["mysql"]
@@ -68,6 +82,19 @@ services:
       DATABASE_URL: mysql+pymysql://actioninbox:${MYSQL_PASSWORD:-pilot-test-password}@mysql:3306/actioninbox?charset=utf8mb4
       SESSION_SECRET: ${SESSION_SECRET:-local-demo-session-secret-change-me-123456}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    depends_on:
+      actioninbox-mysql:
+        condition: service_healthy
+  gmail-sync-worker-mysql:
+    build: .
+    profiles: ["mysql"]
+    command: ["python", "-m", "app.gmail_sync_worker"]
+    environment:
+      DATABASE_URL: mysql+pymysql://actioninbox:${MYSQL_PASSWORD:-pilot-test-password}@mysql:3306/actioninbox?charset=utf8mb4
+      GMAIL_CLIENT_ID: ${GMAIL_CLIENT_ID:-}
+      GMAIL_CLIENT_SECRET: ${GMAIL_CLIENT_SECRET:-}
+      GMAIL_REDIRECT_URI: ${GMAIL_REDIRECT_URI:-http://localhost:8001/auth/google/callback}
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
     depends_on:
       actioninbox-mysql:
         condition: service_healthy
