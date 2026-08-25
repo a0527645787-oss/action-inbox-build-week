@@ -24,13 +24,14 @@ from .invoice_execution import (
     execute_invoice_plan,
     validate_invoice_plan,
 )
-from .models import Execution, ExecutionEvent, Task, utcnow
+from .models import Execution, ExecutionEvent, SheetAppendRecord, Task, utcnow
 from .openai_analysis import _build_ssl_context
 
 
 logger = logging.getLogger(__name__)
 DEMO_TOOL = "create_demo_execution_receipt"
 TERMINAL_STATUSES = {"succeeded", "completed_verified", "failed", "verification_failed", "cancelled"}
+REPLACEABLE_TERMINAL_STATUSES = {"failed", "verification_failed", "cancelled"}
 CANCELLABLE_STATUSES = {"awaiting_approval", "queued"}
 APPROVABLE_STATUS = "awaiting_approval"
 REQUEST_TIMEOUT_SECONDS = 90.0
@@ -125,18 +126,23 @@ def create_execution(db: Session, task: Task, idempotency_key: str) -> Execution
     if existing:
         if not (is_sheet_plan and existing.status in TERMINAL_STATUSES):
             return existing
-        try:
-            existing_plan = json.loads(existing.plan)
-        except (TypeError, ValueError):
-            existing_plan = {}
-        if validate_invoice_plan(task, existing_plan):
+        has_receipt = db.scalar(
+            select(SheetAppendRecord.id)
+            .where(SheetAppendRecord.execution_id == existing.id)
+            .limit(1)
+        ) is not None
+        if existing.status not in REPLACEABLE_TERMINAL_STATUSES or has_receipt:
             return existing
         existing.sheet_proposal_slot = None
+        existing.idempotency_key = (
+            f"superseded:{existing.id}:"
+            f"{hashlib.sha256(existing.idempotency_key.encode()).hexdigest()[:32]}"
+        )
         add_event(
             db,
             existing,
             "superseded",
-            "Terminal proposal no longer matches the configured target; a new review is required.",
+            "Terminal proposal requires a new explicit review before any further execution.",
         )
         db.flush()
     execution = Execution(

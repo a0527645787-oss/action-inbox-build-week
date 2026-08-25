@@ -169,6 +169,31 @@ def test_terminal_failed_proposal_with_changed_target_requires_one_new_review(db
     assert process_next_execution(db, sheets_connector=pytest.fail) is None
 
 
+def test_schema_remediated_failed_proposal_allows_one_new_immutable_review(db, monkeypatch):
+    _configure(monkeypatch)
+    _, task = _invoice_task(db)
+    failed = create_execution(db, task, "schema-failure")
+    failed.status = "failed"
+    failed.completed_at = utcnow()
+    original_plan = failed.plan
+    original_hash = failed.plan_hash
+    db.commit()
+
+    replacement = create_execution(db, task, "after-schema-repair")
+    duplicate = create_execution(db, task, "duplicate-click")
+
+    db.refresh(failed)
+    assert failed.status == "failed" and failed.plan == original_plan
+    assert failed.plan_hash == original_hash and failed.sheet_proposal_slot is None
+    assert failed.idempotency_key.startswith(f"superseded:{failed.id}:")
+    assert replacement.id != failed.id and duplicate.id == replacement.id
+    assert replacement.status == "awaiting_approval" and replacement.sheet_proposal_slot == 1
+    assert json.loads(replacement.plan)["proposal_id"] == json.loads(original_plan)["proposal_id"]
+    assert db.scalar(select(func.count()).select_from(Execution)) == 2
+    assert db.scalar(select(func.count()).select_from(SheetAppendRecord)) == 0
+    assert process_next_execution(db, sheets_connector=pytest.fail) is None
+
+
 def test_separate_approval_appends_raw_row_once_and_persists_exact_receipt(db, monkeypatch):
     _configure(monkeypatch)
     _, task = _invoice_task(db)
