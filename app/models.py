@@ -113,6 +113,7 @@ class Execution(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    append_attempted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     task: Mapped[Task] = relationship(back_populates="executions")
@@ -135,6 +136,33 @@ class ExecutionEvent(Base):
     safe_metadata: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     execution: Mapped[Execution] = relationship(back_populates="events")
+
+
+class TableDestination(Base):
+    __tablename__ = "table_destinations"
+    __table_args__ = (UniqueConstraint("user_id", "target", "tab_name", name="uq_table_destination_target"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    connector_kind: Mapped[str] = mapped_column(String(40), default="google_sheets")
+    display_name: Mapped[str] = mapped_column(String(100))
+    target: Mapped[str] = mapped_column(String(160))
+    tab_name: Mapped[str] = mapped_column(String(100))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    schema_snapshot: Mapped[str] = mapped_column(Text)
+    column_mapping: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class TableAppendRecord(Base):
+    __tablename__ = "table_append_records"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    action_key: Mapped[str] = mapped_column(String(80), unique=True)
+    execution_id: Mapped[int] = mapped_column(ForeignKey("executions.id"), unique=True)
+    destination_id: Mapped[int] = mapped_column(ForeignKey("table_destinations.id"))
+    row_number: Mapped[int] = mapped_column(Integer)
+    row_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class BusinessResource(Base):

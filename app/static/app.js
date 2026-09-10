@@ -40,14 +40,14 @@ document.querySelectorAll('[data-execution-status-url]').forEach(panel => {
   const statusNode = document.getElementById('execution-status');
   if (!statusUrl || !statusNode) return;
   const initialStatus = statusNode.textContent.trim().replaceAll(' ', '_');
-  if (['succeeded', 'failed', 'cancelled'].includes(initialStatus)) return;
+  if (['succeeded', 'completed_verified', 'verification_failed', 'failed', 'cancelled'].includes(initialStatus)) return;
   const timer = setInterval(async () => {
     try {
       const response = await fetch(statusUrl, {headers: {'Accept': 'application/json'}});
       if (!response.ok) return;
       const execution = await response.json();
       statusNode.textContent = execution.status.replaceAll('_', ' ');
-      if (['succeeded', 'failed', 'cancelled'].includes(execution.status)) {
+      if (['succeeded', 'completed_verified', 'verification_failed', 'failed', 'cancelled'].includes(execution.status)) {
         clearInterval(timer);
         window.location.reload();
       }
