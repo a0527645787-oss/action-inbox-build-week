@@ -12,7 +12,7 @@ const resetSubmittedForms = () => document.querySelectorAll('form[data-submittin
   delete form.dataset.submitting;
 });
 
-document.querySelectorAll('form').forEach(form => form.addEventListener('submit', event => {
+document.querySelectorAll('form:not([data-sync-form])').forEach(form => form.addEventListener('submit', event => {
   if (form.dataset.submitting === 'true') {
     event.preventDefault();
     return;
@@ -39,14 +39,15 @@ document.querySelectorAll('[data-execution-status-url]').forEach(panel => {
   const statusUrl = panel.dataset.executionStatusUrl;
   const statusNode = document.getElementById('execution-status');
   if (!statusUrl || !statusNode) return;
-  const initialStatus = statusNode.textContent.trim().replaceAll(' ', '_');
+  const initialStatus = statusNode.dataset.status || statusNode.textContent.trim().replaceAll(' ', '_');
   if (['succeeded', 'completed_verified', 'verification_failed', 'failed', 'cancelled'].includes(initialStatus)) return;
   const timer = setInterval(async () => {
     try {
       const response = await fetch(statusUrl, {headers: {'Accept': 'application/json'}});
       if (!response.ok) return;
       const execution = await response.json();
-      statusNode.textContent = execution.status.replaceAll('_', ' ');
+      statusNode.dataset.status = execution.status;
+      statusNode.textContent = ({queued: 'Getting ready', running: 'Adding your row…', completed_verified: 'Added and verified', succeeded: 'Done', failed: 'Needs your attention', verification_failed: 'Needs your attention', cancelled: 'Cancelled'})[execution.status] || 'Ready for your review';
       if (['succeeded', 'completed_verified', 'verification_failed', 'failed', 'cancelled'].includes(execution.status)) {
         clearInterval(timer);
         window.location.reload();
@@ -55,4 +56,11 @@ document.querySelectorAll('[data-execution-status-url]').forEach(panel => {
       // A transient browser/network failure does not alter durable worker state.
     }
   }, 2000);
+});
+
+const tableChoice = document.getElementById('table-choice');
+if (tableChoice) tableChoice.addEventListener('change', () => {
+  document.querySelectorAll('[data-destination-blocker]').forEach(note => {
+    note.hidden = note.dataset.destinationBlocker !== tableChoice.value;
+  });
 });

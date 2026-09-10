@@ -40,6 +40,12 @@ jobs:
       - name: Build application image
         run: docker build --tag actioninbox:${{ github.sha }} .
 
+      - name: Test sync browser states
+        run: node --test tests/sync_ui.test.cjs
+
+      - name: Measure controlled analysis concurrency
+        run: python scripts/benchmark_sync.py
+
   deploy:
     name: Deploy to EC2 through SSM
     if: >-
@@ -51,6 +57,9 @@ jobs:
     timeout-minutes: 20
     environment: production
     steps:
+      - name: Check out timing probe
+        uses: actions/checkout@v4
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -71,14 +80,23 @@ jobs:
 
           python - "$parameters_file" <<'PY'
           import json
+          import base64
           import os
           import sys
 
           sha = os.environ["DEPLOY_SHA"]
+          with open("scripts/report_sync_timing.py", encoding="utf-8") as probe:
+              timing_code = base64.b64encode(probe.read().encode()).decode()
+          timing_command = (
+              "cd /opt/actioninbox/repo && sudo docker compose --env-file /opt/actioninbox/.env "
+              "-f deploy/docker-compose.production.yml exec -T actioninbox python -c "
+              f"\"import base64;exec(base64.b64decode('{timing_code}'))\""
+          )
           commands = [
               "set -eu",
               "test -f /opt/actioninbox/.env",
               "test -d /opt/actioninbox/repo/.git",
+              timing_command + " || echo 'Aggregate timing unavailable'",
               (
                   'if ! sudo grep -Eq "^SESSION_SECRET=.{32,}$" /opt/actioninbox/.env; then '
                   'session_secret="$(openssl rand -hex 32)"; '
@@ -176,6 +194,7 @@ jobs:
                   'exit 1; fi'
               ),
               f'echo "Deployment succeeded for {sha}"',
+              timing_command + " || echo 'Aggregate timing unavailable'",
           ]
 
           with open(sys.argv[1], "w", encoding="utf-8") as handle:
