@@ -27,7 +27,8 @@ from .models import Analysis, Email, GmailCredential, GmailOAuthState, GmailSync
 
 GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 OAUTH_SCOPE = f"openid email {GMAIL_SCOPE}"
-GMAIL_QUERY = "in:inbox newer_than:7d -in:spam -in:trash"
+GMAIL_QUERY = "in:inbox newer_than:7d -in:spam -in:trash -category:promotions -category:social -category:forums"
+NON_ACTION_CATEGORIES = frozenset({"CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS"})
 GMAIL_PAGE_SIZE = 100
 GMAIL_BOOTSTRAP_PAGE_LIMIT = 10
 GMAIL_DETAIL_CONCURRENCY = 4
@@ -342,6 +343,11 @@ def _received_at(message: dict) -> datetime:
         return utcnow()
 
 
+def _is_non_action_category(message: dict) -> bool:
+    """Use Gmail's existing category labels as a free, deterministic pre-filter."""
+    return bool(set(message.get("labelIds", [])).intersection(NON_ACTION_CATEGORIES))
+
+
 def enqueue_gmail_sync(db: Session, user: User, credential: GmailCredential) -> GmailSyncJob:
     if user.id == DEMO_USER_ID or credential.user_id != user.id or GMAIL_SCOPE not in credential.scopes.split():
         raise GmailSyncError("Gmail credential ownership or scope is invalid")
@@ -504,6 +510,9 @@ def _store_page(db: Session, job: GmailSyncJob, messages: list[dict | None], mes
                 continue
             labels = set(message.get("labelIds", []))
             if "INBOX" not in labels or labels.intersection({"SPAM", "TRASH"}):
+                job.skipped += 1
+                continue
+            if _is_non_action_category(message):
                 job.skipped += 1
                 continue
             body = _body(message.get("payload", {})).strip()[:20000]
