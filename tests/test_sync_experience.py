@@ -44,6 +44,9 @@ def test_browser_sync_redirects_to_inbox_and_api_returns_json_only_when_requeste
             api=client.post('/gmail/sync',headers={'Accept':'application/json'})
             assert api.status_code==202 and api.json()['job_id']==job.id
             assert client.post('/gmail/sync',headers={'X-CSRF-Token':'bad'}).status_code==403
+            expired=client.post('/gmail/sync',headers={'X-CSRF-Token':'bad','Accept':'text/html'})
+            assert expired.status_code==200 and '/inbox' in str(expired.url)
+            assert '"detail"' not in expired.text
             job.status='succeeded';job.imported=2;job.candidates=12;job.tasks_created=1;job.active_slot=None;db.commit()
             page=client.get('/inbox')
             assert 'Checked 12 emails · found 2 new emails · created 1 task.' in page.text
@@ -51,6 +54,22 @@ def test_browser_sync_redirects_to_inbox_and_api_returns_json_only_when_requeste
             page=client.get('/inbox')
             assert 'Try again' in page.text and 'PRIVATE-ERROR' not in page.text
     finally:app.dependency_overrides.clear()
+
+
+def test_invalid_evidence_is_never_projected_or_retried(db,monkeypatch):
+    user,job=setup_job(db,monkeypatch);result=synthetic_batch(db,user,job,count=1)
+    result.email_facts[0].evidence.exact_quote='unsupported text'
+    # Corrupt all support so the exact-evidence validator rejects the task.
+    for fact in result.email_facts:
+        fact.evidence.exact_quote='unsupported text'
+    calls=[]
+    def invalid(*_,**__):
+        calls.append(1)
+        return result
+    analyze_sync_batch(db,job,lambda _:None,analyze=invalid)
+    assert job.tasks_created==0 and job.analysis_failures==1
+    analyze_sync_batch(db,job,lambda _:None,analyze=invalid)
+    assert len(calls)==1 and not db.scalars(select(Task)).all()
 
 
 def test_empty_sync_and_timings_do_not_analyze_existing_email(db,monkeypatch,caplog):

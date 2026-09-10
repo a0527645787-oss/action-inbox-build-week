@@ -30,6 +30,7 @@
   {% for choice in task_view.choices if choice.missing %}<p class="task-blocker" data-destination-blocker="{{ choice.destination.id }}" {% if choice.destination.id != recommended_destination %}hidden{% endif %}>To add to {{ choice.destination.display_name }}, we still need: {{ choice.missing|join(', ') }}. Check the source email for these details.</p>{% endfor %}
 </section>
 <details class="card"><summary>Why am I seeing this?</summary>
+<p>{{ task.email.analysis.summary }}</p>
 <p>This task is based on the following details in your email. The recommended next step is advice for you to review.</p>
 {% for fact in result.email_facts %}<div class="support-fact"><strong>{{ fact.value }}</strong><blockquote>“{{ fact.evidence.exact_quote }}”</blockquote></div>{% endfor %}
 {% for item in guidance_views %}<div class="support-fact"><strong>{{ item.guidance.resource_title }}</strong><p>{{ item.guidance.instruction }}</p><blockquote>{{ item.quote }}</blockquote></div>{% endfor %}
