@@ -190,6 +190,12 @@ def test_inbox_sync_button_uses_gmail_sync_and_oauth_rejects_bad_state(db):
         with _client(db) as client:
             _sign_in(client, db, user)
             inbox = client.get("/inbox")
+            assert 'Connect Gmail' in inbox.text
+            assert 'action="/gmail/sync"' not in inbox.text
+            db.add(GmailCredential(user_id=user.id, account_email="user5@example.test",
+                                   encrypted_token="unused", scopes="https://www.googleapis.com/auth/gmail.readonly"))
+            db.commit()
+            inbox = client.get("/inbox")
             assert 'action="/gmail/sync"' in inbox.text
             assert 'action="/api/inbox/analyze-all"' not in inbox.text
             assert client.get("/auth/google/callback?state=wrong&code=code").status_code == 400

@@ -5,6 +5,9 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -77,6 +80,26 @@ app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 templates = Jinja2Templates(directory=ROOT / "templates")
 templates.env.globals["csrf_token"] = csrf_token
 templates.env.globals["action_labels"] = ACTION_LABELS
+
+
+def _browser_form(request):
+    return request.method == "POST" and "text/html" in request.headers.get("accept", "") and request.url.path.startswith(("/gmail/sync", "/executions/", "/settings/tables", "/tasks/"))
+
+
+@app.exception_handler(StarletteHTTPException)
+async def friendly_form_error(request, exc):
+    if _browser_form(request):
+        if request.url.path == "/gmail/sync":
+            return RedirectResponse("/inbox?sync_error=reload", 303)
+        return templates.TemplateResponse(request, "form_error.html", {}, status_code=exc.status_code)
+    return await http_exception_handler(request, exc)
+
+
+@app.exception_handler(RequestValidationError)
+async def friendly_form_validation(request, exc):
+    if _browser_form(request):
+        return templates.TemplateResponse(request, "form_error.html", {}, status_code=422)
+    return await request_validation_exception_handler(request, exc)
 
 
 @app.get("/health")
