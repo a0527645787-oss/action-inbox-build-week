@@ -1,34 +1,47 @@
 {% extends "base.html" %}
 {% block title %}{{ task.title }} · ActionInbox{% endblock %}
 {% block content %}
-{% if proposal_error %}
-<section class="card notice"><p>The table proposal could not be prepared safely. No external action was taken; please try again.</p></section>
-{% endif %}
-<a class="back" href="/dashboard">← Dashboard</a>
-<div class="detail-head"><div><div class="badge-row"><span class="badge">{{ task.email.analysis.classification|replace('_',' ') }}</span><span class="badge source">{{ 'Live GPT-5.6' if task.email.analysis.source == 'live_gpt' else 'Demo fallback' }}</span>{% if task.completed_at %}<span class="badge done">Completed</span>{% endif %}</div><h1>{{ task.title }}</h1><div class="actions"><form method="post" action="/api/emails/{{ task.email.id }}/reanalyze"><input type="hidden" name="csrf" value="{{ csrf_token(request) }}"><button class="text-button" type="submit">Re-analyze email</button></form>{% if task.completed_at %}<form method="post" action="/tasks/{{ task.id }}/reopen"><input type="hidden" name="csrf" value="{{ csrf_token(request) }}"><button class="button secondary" type="submit">Restore to active</button></form>{% else %}<form method="post" action="/tasks/{{ task.id }}/complete"><input type="hidden" name="csrf" value="{{ csrf_token(request) }}"><button class="button secondary" type="submit">Mark as completed</button></form>{% endif %}</div>{% if task.completed_at %}<p class="muted">Completed {{ task.completed_at }} by the current signed-in user.</p>{% endif %}</div><div class="deadline"><span>Deadline</span><strong>{{ task.deadline_text or 'No deadline' }}</strong></div></div>
-<section class="card section-stack"><span class="eyebrow">1 · What needs to be done</span><h2>{{ task.title }}</h2><p>{{ task.email.analysis.summary }}</p>{% if execution %}<p><strong>Successful outcome:</strong> {{ execution.outcome.text }} <span class="source-label {{ execution.outcome.source|lower }}">{{ execution.outcome.source|replace('_',' ') }}</span></p>{% endif %}</section>
-<section class="card section-stack"><span class="eyebrow">2 · Verified facts and evidence</span>{% for fact in result.email_facts %}<div class="fact-row"><div><span class="source-label email_fact">Email fact</span><strong>{{ fact.type|replace('_',' ')|title }}: {{ fact.value }}</strong></div><blockquote>“{{ fact.evidence.exact_quote }}”</blockquote><small>Exact email evidence · characters {{ fact.evidence.start_offset }}–{{ fact.evidence.end_offset }}</small></div>{% endfor %}<details><summary>Show original email with highlighted evidence</summary><h3>{{ task.email.subject }}</h3><p class="muted">From {{ task.email.sender }}</p><div class="email-body">{{ before }}<mark id="evidence">{{ evidence }}</mark>{{ after }}</div></details></section>
-{% if execution %}
-<section class="card section-stack"><span class="eyebrow">3 · How to complete this task</span><ol class="execution-list">{% for step in execution.ordered_steps %}<li><p>{{ step.text }}</p><span class="source-label {{ step.source|lower }}">{{ step.source|replace('_',' ') }}</span></li>{% endfor %}</ol><h3>Safety checks</h3><ul>{% for item in execution.safety_checks %}<li>{{ item.text }} <span class="source-label {{ item.source|lower }}">{{ item.source|replace('_',' ') }}</span></li>{% endfor %}</ul></section>
-<section class="card section-stack"><span class="eyebrow">4 · Required inputs and missing information</span><h3>Required inputs</h3><ul>{% for item in execution.required_inputs %}<li>{{ item.text }} <span class="source-label {{ item.source|lower }}">{{ item.source|replace('_',' ') }}</span></li>{% endfor %}</ul><h3>Missing or uncertain</h3>{% if execution.missing_information %}<ul>{% for item in execution.missing_information %}<li>{{ item }} <span class="source-label missing_uncertain">Missing / uncertain</span></li>{% endfor %}</ul>{% else %}<p>No missing information identified.</p>{% endif %}</section>
-{% endif %}
-<section class="card section-stack"><span class="eyebrow">5 · Business guidance</span>{% if guidance_views %}{% for item in guidance_views %}<div class="guidance-block"><h3>{{ item.guidance.resource_title }}</h3><p>{{ item.guidance.instruction }} <span class="source-label business_guidance">Business guidance</span></p><div class="resource-evidence">{{ item.before }}<mark>{{ item.quote }}</mark>{{ item.after }}</div><small>Exact resource quote · characters {{ item.guidance.resource_evidence.start_offset }}–{{ item.guidance.resource_evidence.end_offset }}</small></div>{% endfor %}{% else %}<p>No relevant enabled business resource was found.</p>{% endif %}</section>
-<section class="card suggestion section-stack"><span class="eyebrow">6 · AI recommendations · not stated in the email or resource</span>{% for suggestion in result.ai_suggestions %}<p>{{ suggestion.text }} <span class="source-label ai_recommendation">AI recommendation</span></p>{% endfor %}</section>
-<section class="card section-stack">
-  <h2>Add to a table</h2>
-  <p>Choose a table and review the suggested row. Nothing is added until you approve it once.</p>
-  {% if table_destinations %}
-  <form method="post" action="/tasks/{{ task.id }}/execution-plan"><input type="hidden" name="csrf" value="{{ csrf_token(request) }}">
-    <input type="hidden" name="idempotency_key" value="{{ execution_idempotency_key }}">
-    <label>Table <select name="destination_id" required>
-      {% if not recommended_destination %}<option value="">Choose a table</option>{% endif %}
-      {% for d in table_destinations %}<option value="{{ d.id }}" {{ 'selected' if d.id == recommended_destination else '' }}>{{ d.display_name }}{{ ' (recommended)' if d.id == recommended_destination else '' }}</option>{% endfor %}
-    </select></label>
-    <button class="button" type="submit">Add to a table</button>
-  </form>
-  {% else %}<p><a href="/settings/tables">Configure a table destination</a> to prepare an action.</p>{% endif %}
-  {% if executions %}<details><summary>Action history</summary><ul>
-    {% for item in executions %}<li><a href="/executions/{{ item.id }}">Action #{{ item.id }}</a> · {{ item.status|replace('_', ' ') }}</li>{% endfor %}
-  </ul></details>{% endif %}
+<div class="task-focus">
+<a class="back" href="/dashboard">← Your tasks</a>
+<section class="card">
+  <span class="eyebrow">{{ 'Completed' if task.completed_at else 'Needs your attention' }}</span>
+  <h1>{{ task.title }}</h1>
+  <p class="task-summary">{{ task.email.analysis.summary }}</p>
+  <div class="task-meta">{% if task.deadline_text %}<span>Due {{ task.deadline_text }}</span>{% endif %}
+  <form method="post" action="/tasks/{{ task.id }}/{{ 'reopen' if task.completed_at else 'complete' }}"><button class="text-button" type="submit">{{ 'Restore to active' if task.completed_at else 'Mark as completed' }}</button></form></div>
+  {% if proposal_error %}<p class="task-blocker">We couldn’t prepare this action. Please review the information below and try again.</p>{% endif %}
+  <div class="task-next">
+    <strong>Recommended next step</strong><p>{{ task_view.next_step }}</p>
+    {% if table_destinations and not task.completed_at %}
+    <form method="post" action="/tasks/{{ task.id }}/execution-plan">
+      <input type="hidden" name="csrf" value="{{ csrf_token(request) }}">
+      <input type="hidden" name="idempotency_key" value="{{ execution_idempotency_key }}">
+      <label for="table-choice">Add this information to</label>
+      <select id="table-choice" name="destination_id" required>
+        {% if not recommended_destination %}<option value="">Choose a table</option>{% endif %}
+        {% for d in table_destinations %}<option value="{{ d.id }}" {{ 'selected' if d.id == recommended_destination else '' }}>{{ d.display_name }}{{ ' (recommended)' if d.id == recommended_destination else '' }}</option>{% endfor %}
+      </select>
+      <button class="button" type="submit">Add to a table</button>
+      <p class="muted"><small>You’ll review the values before approving anything.</small></p>
+    </form>
+    {% else %}<p><small>Review the source below before carrying out this step.</small></p>{% endif %}
+  </div>
+  {% for item in task_view.blocking %}<p class="task-blocker"><strong>Before you continue:</strong> {{ item }}</p>{% endfor %}
+  {% for choice in task_view.choices if choice.missing %}<p class="task-blocker" data-destination-blocker="{{ choice.destination.id }}" {% if choice.destination.id != recommended_destination %}hidden{% endif %}>To add to {{ choice.destination.display_name }}, we still need: {{ choice.missing|join(', ') }}. Check the source email for these details.</p>{% endfor %}
 </section>
+<details class="card"><summary>Why am I seeing this?</summary>
+<p>This task is based on the following details in your email. The recommended next step is advice for you to review.</p>
+{% for fact in result.email_facts %}<div class="support-fact"><strong>{{ fact.value }}</strong><blockquote>“{{ fact.evidence.exact_quote }}”</blockquote></div>{% endfor %}
+{% for item in guidance_views %}<div class="support-fact"><strong>{{ item.guidance.resource_title }}</strong><p>{{ item.guidance.instruction }}</p><blockquote>{{ item.quote }}</blockquote></div>{% endfor %}
+{% if execution %}<p><strong>Before taking action</strong></p><ul>{% for item in execution.safety_checks %}<li>{{ item.text }}</li>{% endfor %}</ul>{% endif %}
+</details>
+<details class="card"><summary>View source email</summary><h2>{{ task.email.subject }}</h2><p class="muted">From {{ task.email.sender }}</p><div class="email-body">{{ before }}<mark>{{ evidence }}</mark>{{ after }}</div></details>
+<details class="card"><summary>Technical details</summary>
+<p>Analysis: {{ task.email.analysis.source }} · {{ task.email.analysis.classification }}</p>
+{% for fact in result.email_facts %}<p>Exact email evidence · characters {{ fact.evidence.start_offset }}–{{ fact.evidence.end_offset }}</p>{% endfor %}
+{% if execution %}<h3>Supporting plan</h3><ol>{% for step in execution.ordered_steps %}<li>{{ step.text }} · {{ step.source }}</li>{% endfor %}</ol>{% endif %}
+{% if executions %}<h3>Action history</h3><ul>{% for item in executions %}<li><a href="/executions/{{ item.id }}">Action #{{ item.id }}</a> · {{ action_labels.get(item.status, 'Recorded action') }}</li>{% endfor %}</ul>{% endif %}
+<form method="post" action="/api/emails/{{ task.email.id }}/reanalyze"><button class="text-button" type="submit">Re-analyze email</button></form>
+</details>
+</div>
 {% endblock %}

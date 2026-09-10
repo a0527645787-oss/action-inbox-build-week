@@ -1,28 +1,26 @@
 {% extends "base.html" %}
 {% block title %}Review action · ActionInbox{% endblock %}
 {% block content %}
-<a class="back" href="/tasks/{{ execution_record.task_id }}">← Task</a>
-<section class="card section-stack">
-<h1>Add {{ execution_data.plan.summary }} to {{ execution_data.plan.destination_name }}</h1>
-<span class="badge" id="execution-status">{{ execution_record.status|replace('_', ' ') }}</span>
-{% for item in execution_data.plan.preview %}<div><strong>{{ item.column }}</strong>: {{ item.value }}</div>{% endfor %}
+<div class="task-focus">
+<a class="back" href="/tasks/{{ execution_record.task_id }}">← Back to task</a>
+<section class="card">
+<span class="eyebrow" id="execution-status" data-status="{{ execution_record.status }}">{{ action_labels.get(execution_record.status, 'Recorded action') }}</span>
+<h1>{{ 'Added to' if execution_record.status == 'completed_verified' else 'Add to' }} {{ execution_data.plan.destination_name }}</h1>
+<p>{{ execution_data.plan.summary }}</p>
+<dl class="preview-values">{% for item in execution_data.plan.preview %}<dt>{{ item.column }}</dt><dd>{{ item.value }}</dd>{% endfor %}</dl>
 {% if approval_token %}
-<p>Approve these values once. The worker will add this row and verify that the saved values match.</p>
-<form method="post" action="/executions/{{ execution_record.id }}/approve"><input type="hidden" name="csrf" value="{{ csrf_token(request) }}">
-<input type="hidden" name="plan_hash" value="{{ execution_record.plan_hash }}">
-<input type="hidden" name="approval" value="{{ approval_token }}">
+<p>We’ll add these values to your table and check that they saved correctly.</p>
+<form method="post" action="/executions/{{ execution_record.id }}/approve">
+<input type="hidden" name="csrf" value="{{ csrf_token(request) }}"><input type="hidden" name="plan_hash" value="{{ execution_record.plan_hash }}"><input type="hidden" name="approval" value="{{ approval_token }}">
 <button class="button" type="submit">Approve and add row once</button></form>
 {% endif %}
-{% if can_cancel %}<form method="post" action="/executions/{{ execution_record.id }}/cancel"><input type="hidden" name="csrf" value="{{ csrf_token(request) }}"><button class="button secondary" type="submit">Cancel</button></form>{% endif %}
-</section>
-<section class="card section-stack" data-execution-status-url="/executions/{{ execution_record.id }}/status">
-<h2>Receipt</h2>
-{% if execution_data.result %}<p>{{ execution_data.result.message }}</p>
-{% elif execution_data.error_message %}<p class="notice">{{ execution_data.error_message }}</p>
-{% else %}<p>No result yet. Execution starts only after approval.</p>{% endif %}
-</section>
-<details class="card"><summary>Technical audit details</summary>
-<p>Plan fingerprint: <code>{{ execution_record.plan_hash }}</code></p><p>Tool: {{ execution_record.tool_name }}</p>
-<ol>{% for event in execution_record.events %}<li>{{ event.event_type|replace('_', ' ') }} · {{ event.status|replace('_', ' ') }} · {{ event.created_at }}</li>{% endfor %}</ol>
-</details>
+{% if can_cancel %}<form method="post" action="/executions/{{ execution_record.id }}/cancel"><input type="hidden" name="csrf" value="{{ csrf_token(request) }}"><button class="text-button" type="submit">Cancel</button></form>{% endif %}
+<div data-execution-status-url="/executions/{{ execution_record.id }}/status">
+{% if execution_data.result %}<p class="receipt-note">{{ execution_data.result.message }}</p>
+{% elif execution_data.error_message %}<p class="task-blocker">We couldn’t confirm that the row saved correctly. Please review your table before taking further action.</p>
+{% elif execution_record.status in ['queued', 'running'] %}<p class="receipt-note" role="status">We’re taking care of it. You can leave this page and come back.</p>{% endif %}
+</div></section>
+<details class="card"><summary>Technical details</summary><p>Plan fingerprint: <code>{{ execution_record.plan_hash }}</code></p><p>Tool: {{ execution_record.tool_name }}</p><p>Status: {{ execution_record.status }}</p>
+<ol>{% for event in execution_record.events %}<li>{{ event.event_type|replace('_', ' ') }} · {{ event.status|replace('_', ' ') }} · {{ event.created_at }}</li>{% endfor %}</ol></details>
+</div>
 {% endblock %}

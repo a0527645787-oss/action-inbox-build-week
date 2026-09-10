@@ -41,6 +41,7 @@ from .execution import PACKAGE_EXECUTORS, build_execution_package, package_as_te
 from .table_actions import TableError, destinations_for, recommend_destination
 from .table_routes import router as table_router
 from .action_csrf import csrf_token, require_action_csrf
+from .presentation import ACTION_LABELS, task_presentation, sync_presentation
 from .gmail import (
     GMAIL_BOOTSTRAP_PAGE_LIMIT,
     GMAIL_DETAIL_CONCURRENCY,
@@ -75,6 +76,7 @@ app.include_router(table_router)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 templates = Jinja2Templates(directory=ROOT / "templates")
 templates.env.globals["csrf_token"] = csrf_token
+templates.env.globals["action_labels"] = ACTION_LABELS
 
 
 @app.get("/health")
@@ -127,10 +129,12 @@ def inbox(request: Request, db: Session = Depends(get_db), current_user: User = 
     if current_user.id == DEMO_USER_ID:
         query = query.where(Email.source == "demo")
     emails = db.scalars(query.order_by(Email.received_at.desc())).all()
+    credential = db.scalar(select(GmailCredential).where(GmailCredential.user_id == current_user.id))
+    latest_job = db.scalar(select(GmailSyncJob).where(GmailSyncJob.user_id == current_user.id).order_by(GmailSyncJob.id.desc()))
     return templates.TemplateResponse(
         request,
         "inbox.html",
-        {"emails": emails, "current_user": current_user, "is_demo": current_user.id == DEMO_USER_ID},
+        {"emails": emails, "current_user": current_user, "is_demo": current_user.id == DEMO_USER_ID, "credential": credential, "latest_job": latest_job, "sync_view": sync_presentation(latest_job)},
     )
 
 
@@ -146,7 +150,7 @@ def gmail_page(request: Request, reconnect: int = 0, sync_error: int = 0, db: Se
         "scope": GMAIL_SCOPE, "query": GMAIL_QUERY, "page_size": GMAIL_PAGE_SIZE,
         "bootstrap_page_limit": GMAIL_BOOTSTRAP_PAGE_LIMIT, "detail_concurrency": GMAIL_DETAIL_CONCURRENCY,
         "reconnect": bool(reconnect), "sync_error": bool(sync_error),
-        "latest_job": latest_job, "current_user": current_user})
+        "latest_job": latest_job, "sync_view": sync_presentation(latest_job), "current_user": current_user})
 
 
 @app.get("/gmail/status")
@@ -197,26 +201,38 @@ def gmail_oauth_callback(
     return response
 
 
-@app.post("/gmail/sync")
-def gmail_sync(db: Session = Depends(get_db), current_user: User = Depends(require_personal_user)):
+@app.post("/gmail/sync", dependencies=[Depends(require_action_csrf)])
+def gmail_sync(request: Request, db: Session = Depends(get_db), current_user: User = Depends(require_personal_user)):
     credential = db.scalar(select(GmailCredential).where(GmailCredential.user_id == current_user.id).order_by(GmailCredential.updated_at.desc()))
+    wants_json = "application/json" in request.headers.get("accept", "")
     if not credential:
-        raise HTTPException(409, "Connect Gmail before syncing")
+        if not wants_json:
+            return RedirectResponse("/inbox?sync_error=connect", 303)
+        return JSONResponse({"message": "Connect Gmail to check for new emails."}, status_code=409)
     try:
         job = enqueue_gmail_sync(db, current_user, credential)
-    except GmailSyncError as exc:
-        raise HTTPException(409, "Gmail sync could not be queued safely") from exc
+    except Exception:
+        db.rollback()
+        if not wants_json:
+            return RedirectResponse("/inbox?sync_error=queue", 303)
+        return JSONResponse({"message": "We couldn’t start checking your emails. Please try again."}, status_code=409)
+    if not wants_json:
+        return RedirectResponse("/inbox", 303)
     status_url = f"/gmail/sync/{job.id}"
-    return JSONResponse({"job_id": job.id, "status": job.status, "status_url": status_url}, status_code=202, headers={"Location": status_url})
+    return JSONResponse({"job_id": job.id, "status": job.status, "status_url": status_url, **sync_presentation(job)}, status_code=202, headers={"Location": status_url})
 
 
 @app.get("/gmail/sync/{job_id}")
-def gmail_sync_status(job_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_personal_user)):
+def gmail_sync_status(job_id: int, request: Request, db: Session = Depends(get_db), current_user: User = Depends(require_personal_user)):
     job = db.scalar(select(GmailSyncJob).where(GmailSyncJob.id == job_id, GmailSyncJob.user_id == current_user.id))
     if not job:
         raise HTTPException(404, "Gmail sync job not found")
+    if "text/html" in request.headers.get("accept", ""):
+        return RedirectResponse("/inbox", 303)
     return JSONResponse({
         "id": job.id,
+        **sync_presentation(job),
+        "tasks_created": job.tasks_created,
         "status": job.status,
         "mode": job.mode,
         "pages_listed": job.pages_listed,
@@ -226,7 +242,7 @@ def gmail_sync_status(job_id: int, db: Session = Depends(get_db), current_user: 
         "duplicates": job.duplicates,
         "skipped": job.skipped,
         "failures": job.failures,
-        "safe_error": job.safe_error,
+
         "updated_at": (job.heartbeat_at or job.created_at).isoformat(),
     })
 
@@ -421,7 +437,9 @@ def task_detail(
         .where(Execution.task_id == task.id, Execution.user_id == current_user.id)
         .order_by(Execution.id.desc())
     ).all()
+    destinations = destinations_for(db, current_user.id)
     return templates.TemplateResponse(request, "task.html", {
+        "task_view": task_presentation(task, result, destinations),
         "task": task,
         "before": before,
         "evidence": evidence,
@@ -431,8 +449,8 @@ def task_detail(
         "execution": result.execution_guidance,
         "executions": executions,
         "execution_idempotency_key": str(uuid4()),
-        "table_destinations": destinations_for(db, current_user.id),
-        "recommended_destination": recommend_destination(task, destinations_for(db, current_user.id)),
+        "table_destinations": destinations,
+        "recommended_destination": recommend_destination(task, destinations),
         "proposal_error": bool(proposal_error),
         "current_user": current_user,
     })

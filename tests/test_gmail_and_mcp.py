@@ -114,7 +114,7 @@ def test_gmail_sync_job_is_read_only_ingestion_and_idempotent(db, monkeypatch):
     client = GmailClient()
     job = enqueue_gmail_sync(db, user, credential)
     assert enqueue_gmail_sync(db, user, credential).id == job.id
-    run_gmail_sync_job(db, job, client=client)
+    run_gmail_sync_job(db, job, client=client, triage=False)
     db.refresh(job)
     assert job.status == "succeeded" and job.imported == 1
     list_call = client.calls[0]
@@ -124,7 +124,7 @@ def test_gmail_sync_job_is_read_only_ingestion_and_idempotent(db, monkeypatch):
     assert email and email.source == "gmail" and email.analyzed is False
     assert email.analysis is None and email.task is None
     second = enqueue_gmail_sync(db, user, credential)
-    run_gmail_sync_job(db, second, client=client)
+    run_gmail_sync_job(db, second, client=client, triage=False)
     assert db.scalar(select(func.count()).select_from(Email).where(Email.gmail_message_id == "gmail-1")) == 1
     assert db.scalar(select(func.count()).select_from(Task).where(Task.email_id == email.id)) == 0
 
@@ -146,7 +146,9 @@ def test_gmail_sync_route_returns_202_and_same_active_job(db, monkeypatch):
     app.dependency_overrides[get_db] = _override_db(db)
     app.dependency_overrides[get_current_user] = lambda: user
     try:
-        client = TestClient(app)
+        import hmac, hashlib
+        token = hmac.new(b"test-session-secret-at-least-thirty-two-bytes", b"action-csrf:", hashlib.sha256).hexdigest()
+        client = TestClient(app, headers={"Accept": "application/json", "X-CSRF-Token": token})
         first = client.post("/gmail/sync")
         second = client.post("/gmail/sync")
         assert first.status_code == 202 and second.status_code == 202
@@ -181,14 +183,14 @@ def test_gmail_worker_paginates_then_uses_history_cursor(db, monkeypatch):
     db.add(credential); db.commit()
     client = PagedClient()
     bootstrap = enqueue_gmail_sync(db, user, credential)
-    run_gmail_sync_job(db, bootstrap, client=client)
+    run_gmail_sync_job(db, bootstrap, client=client, triage=False)
     db.refresh(credential); db.refresh(bootstrap)
     assert bootstrap.pages_listed == 2 and bootstrap.imported == 2
     assert credential.history_id == "history-2"
 
     incremental = enqueue_gmail_sync(db, user, credential)
     assert incremental.mode == "history" and incremental.start_history_id == "history-2"
-    run_gmail_sync_job(db, incremental, client=client)
+    run_gmail_sync_job(db, incremental, client=client, triage=False)
     db.refresh(credential)
     assert credential.history_id == "history-3"
     assert db.scalar(select(func.count()).select_from(Email).where(Email.user_id == user.id)) == 3
@@ -234,7 +236,7 @@ def test_transient_detail_failure_is_bounded_and_isolated(db, monkeypatch):
     db.add(credential); db.commit()
     client = IsolatedFailureClient()
     job = enqueue_gmail_sync(db, user, credential)
-    run_gmail_sync_job(db, job, client=client)
+    run_gmail_sync_job(db, job, client=client, triage=False)
     db.refresh(job)
     assert job.status == "partial" and job.imported == 1 and job.failures == 1
     assert job.safe_error == "MESSAGE_FAILURES" and client.failed_attempts == 4
@@ -334,7 +336,7 @@ def test_gmail_page_discloses_exact_scope(db, monkeypatch):
         assert GMAIL_QUERY in response.text
         assert GMAIL_SCOPE in response.text
         assert "100 messages per page" in response.text
-        assert "Not run during Gmail ingestion" in response.text
+        assert "New emails only" in response.text
         assert "gmail-sync-progress" in response.text
     finally:
         app.dependency_overrides.clear()
