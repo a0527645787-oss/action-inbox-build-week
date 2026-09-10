@@ -138,6 +138,52 @@ def test_gmail_sync_job_is_read_only_ingestion_and_idempotent(db, monkeypatch):
         db.rollback()
 
 
+def test_promotional_category_is_skipped_before_storage_or_analysis(db, monkeypatch):
+    class PromotionalClient(GmailClient):
+        def get(self, url, headers=None, params=None):
+            response = super().get(url, headers=headers, params=params)
+            if not url.endswith(("/messages", "/profile")):
+                response.data["labelIds"].append("CATEGORY_PROMOTIONS")
+            return response
+
+    user = _personal_user(db)
+    credential = GmailCredential(
+        user_id=user.id,
+        account_email="pilot@example.test",
+        encrypted_token=_token(monkeypatch),
+        scopes=GMAIL_SCOPE,
+    )
+    db.add(credential)
+    db.commit()
+    job = enqueue_gmail_sync(db, user, credential)
+    run_gmail_sync_job(db, job, client=PromotionalClient())
+
+    assert job.status == "succeeded"
+    assert job.imported == 0 and job.skipped == 1 and job.tasks_created == 0
+    assert db.scalar(select(func.count()).select_from(Email).where(Email.user_id == user.id)) == 0
+
+
+def test_bootstrap_query_excludes_bulk_categories_but_keeps_updates(db, monkeypatch):
+    user = _personal_user(db)
+    credential = GmailCredential(
+        user_id=user.id,
+        account_email="pilot@example.test",
+        encrypted_token=_token(monkeypatch),
+        scopes=GMAIL_SCOPE,
+    )
+    db.add(credential)
+    db.commit()
+    client = GmailClient()
+    job = enqueue_gmail_sync(db, user, credential)
+    run_gmail_sync_job(db, job, client=client, triage=False)
+
+    query = next(call[2]["q"] for call in client.calls if call[1].endswith("/messages"))
+    assert "-category:promotions" in query
+    assert "-category:social" in query
+    assert "-category:forums" in query
+    assert "-category:updates" not in query
+
+
 def test_gmail_sync_route_returns_202_and_same_active_job(db, monkeypatch):
     user = _personal_user(db)
     credential = GmailCredential(user_id=user.id, account_email="pilot@example.test",
