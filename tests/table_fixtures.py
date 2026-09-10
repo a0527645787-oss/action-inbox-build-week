@@ -64,6 +64,3 @@ def _invoice_task(db):
     db.add(task)
     db.commit()
     return user, task
-
-
-

@@ -85,6 +85,3 @@ def extract_invoice_details(task: Task) -> InvoiceDetails | None:
         source_email_id=task.email.gmail_message_id or task.email.external_id,
         missing_fields=missing,
     )
-
-
-

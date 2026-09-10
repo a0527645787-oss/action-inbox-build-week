@@ -337,6 +337,10 @@ def serialize_execution(execution: Execution) -> dict:
     plan = {"summary": raw.get("summary", "Previously recorded action"),
             "destination_name": raw.get("destination", {}).get("name", "Configured table"),
             "preview": raw.get("preview", []), "actions": raw.get("actions", [])}
+    if not plan["preview"] and raw.get("invoice"):
+        plan["preview"] = [{"column": field.replace("_", " ").title(), "value": raw["invoice"][field]}
+                           for field in ("supplier", "invoice_number", "amount", "currency", "due_date")
+                           if raw["invoice"].get(field)]
     result = json.loads(execution.result) if execution.result else None
     if result:
         result = {"message": "Row added and verified." if execution.status == "completed_verified" else "Action completed.",

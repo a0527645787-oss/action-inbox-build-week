@@ -501,6 +501,7 @@ def _owned_execution(db: Session, execution_id: int, user_id: str) -> Execution:
 @app.post("/tasks/{task_id}/execution-plan", dependencies=[Depends(require_action_csrf)])
 def execution_plan(
     task_id: int,
+    request: Request,
     idempotency_key: str = Form(...),
     destination_id: int | None = Form(None),
     db: Session = Depends(get_db),
@@ -516,7 +517,9 @@ def execution_plan(
         execution = create_execution(db, task, key, destination_id)
     except TableError as exc:
         db.rollback()
-        raise HTTPException(422, str(exc)) from None
+        return templates.TemplateResponse(request, "action_error.html", {
+            "current_user": current_user, "message": str(exc), "task_id": task.id,
+        }, status_code=422)
     except ValueError:
         db.rollback()
         return RedirectResponse(f"/tasks/{task.id}?proposal_error=1", 303)

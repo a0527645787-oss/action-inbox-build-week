@@ -223,3 +223,52 @@ def test_exact_invoice_evidence_behavior_is_preserved(db):
     data["email_facts"][0]["evidence"]["exact_quote"] = "Supplier: Invented"
     task.email.analysis.structured_result = json.dumps(data)
     assert not task_values(task).get("supplier")
+
+
+def test_cross_user_destination_and_wrong_provider_are_blocked(db):
+    from app.models import User
+    user, task = _invoice_task(db)
+    other = User(id="other", email="other@example.test", display_name="Other")
+    db.add(other); db.commit()
+    private = destination(db, other)
+    with pytest.raises(TableError, match="enabled table"):
+        prepare(db, task, private, FakeTable(private))
+    with client_for(db, user) as client:
+        assert client.get(f"/settings/tables/{private.id}").status_code == 404
+        assert client.post(f"/settings/tables/{private.id}/disable").status_code == 404
+    own = destination(db, user)
+    ex = prepare(db, task, own, FakeTable(own)); approve(db, ex)
+    wrong = FakeTable(private); wrong.target = "another-target"
+    assert process_next_execution(db, sheets_connector=wrong).status == "verification_failed"
+    assert wrong.append_calls == 0
+
+
+def test_frozen_plan_tampering_and_changed_live_headers_never_write(db):
+    user, task = _invoice_task(db); d = destination(db, user); table = FakeTable(d)
+    ex = prepare(db, task, d, table); approve(db, ex)
+    plan = json.loads(ex.plan); plan["final_row"][0] = "Tampered"
+    ex.plan = json.dumps(plan); db.commit()
+    assert process_next_execution(db, sheets_connector=table).status == "failed"
+    assert table.append_calls == 0
+    second = destination(db, user, "Second"); table2 = FakeTable(second)
+    ex2 = prepare(db, task, second, table2); approve(db, ex2)
+    table2.rows[0] = ["Changed", "Invoice", "Tracking"]
+    assert process_next_execution(db, sheets_connector=table2).status == "verification_failed"
+    assert table2.append_calls == 0
+
+
+def test_provider_uses_frozen_raw_values_and_escaped_dynamic_range():
+    from app.table_actions import GoogleSheetsTable
+    from unittest.mock import MagicMock
+    provider = GoogleSheetsTable.__new__(GoogleSheetsTable)
+    provider.target, provider.tab, provider.read_only = "configured-target", "Owner's Orders", False
+    provider.service = MagicMock()
+    api = provider.service.spreadsheets.return_value.values.return_value
+    api.append.return_value.execute.return_value = {"updates": {"updatedRange": "'Owner''s Orders'!A2:C2"}}
+    row = ["=not-a-formula", "tracking", ""]
+    assert provider.append_row(row) == 2
+    api.append.assert_called_once_with(spreadsheetId="configured-target", range="'Owner''s Orders'!A:C",
+        valueInputOption="RAW", insertDataOption="INSERT_ROWS", body={"values": [row]})
+    api.get.return_value.execute.return_value = {"values": [["=not-a-formula", "tracking"]]}
+    assert provider.read_row(2, 3) == row
+    api.get.assert_called_once_with(spreadsheetId="configured-target", range="'Owner''s Orders'!A2:C2")

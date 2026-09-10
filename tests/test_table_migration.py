@@ -14,6 +14,11 @@ def test_migrates_expenses_metadata_without_changing_legacy_executions(tmp_path,
     command.upgrade(config, "20260824_0006")
     engine = create_engine(url)
     with engine.begin() as conn:
+        # 0001 imports current metadata. Remove only the new empty structures in this
+        # isolated test database to exercise the actual production upgrade path.
+        conn.execute(text("DROP TABLE table_append_records"))
+        conn.execute(text("DROP TABLE table_destinations"))
+        conn.execute(text("ALTER TABLE executions DROP COLUMN append_attempted_at"))
         conn.execute(text("INSERT INTO users (id,email,display_name,created_at,updated_at) VALUES ('owner','owner@example.test','Owner',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"))
         conn.execute(text("INSERT INTO emails (id,user_id,external_id,sender,subject,received_at,body,source,analyzed) VALUES (99,'owner','old','sender','old',CURRENT_TIMESTAMP,'old','gmail',1)"))
         conn.execute(text("INSERT INTO tasks (id,user_id,email_id,title) VALUES (99,'owner',99,'old')"))
