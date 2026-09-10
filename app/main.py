@@ -38,7 +38,9 @@ from .agent_execution import (
     serialize_execution,
 )
 from .execution import PACKAGE_EXECUTORS, build_execution_package, package_as_text, parse_structured_result
-from .invoice_execution import SheetsNotConfigured, extract_invoice_details, sheets_target
+from .table_actions import TableError, destinations_for, recommend_destination
+from .table_routes import router as table_router
+from .action_csrf import csrf_token, require_action_csrf
 from .gmail import (
     GMAIL_BOOTSTRAP_PAGE_LIMIT,
     GMAIL_DETAIL_CONCURRENCY,
@@ -69,8 +71,10 @@ async def lifespan(app):
 
 
 app = FastAPI(title="ActionInbox", lifespan=lifespan)
+app.include_router(table_router)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 templates = Jinja2Templates(directory=ROOT / "templates")
+templates.env.globals["csrf_token"] = csrf_token
 
 
 @app.get("/health")
@@ -427,8 +431,8 @@ def task_detail(
         "execution": result.execution_guidance,
         "executions": executions,
         "execution_idempotency_key": str(uuid4()),
-        "invoice_details": extract_invoice_details(task),
-        "sheets_target_configured": sheets_target() is not None,
+        "table_destinations": destinations_for(db, current_user.id),
+        "recommended_destination": recommend_destination(task, destinations_for(db, current_user.id)),
         "proposal_error": bool(proposal_error),
         "current_user": current_user,
     })
@@ -494,10 +498,11 @@ def _owned_execution(db: Session, execution_id: int, user_id: str) -> Execution:
     return execution
 
 
-@app.post("/tasks/{task_id}/execution-plan")
+@app.post("/tasks/{task_id}/execution-plan", dependencies=[Depends(require_action_csrf)])
 def execution_plan(
     task_id: int,
     idempotency_key: str = Form(...),
+    destination_id: int | None = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -506,8 +511,13 @@ def execution_plan(
     if not key or len(key) > 100:
         raise HTTPException(422, "Invalid idempotency key")
     try:
-        execution = create_execution(db, task, key)
-    except (SheetsNotConfigured, ValueError):
+        if task.email.source == "gmail" and destination_id is None:
+            raise TableError("Choose a configured table first.")
+        execution = create_execution(db, task, key, destination_id)
+    except TableError as exc:
+        db.rollback()
+        raise HTTPException(422, str(exc)) from None
+    except ValueError:
         db.rollback()
         return RedirectResponse(f"/tasks/{task.id}?proposal_error=1", 303)
     return RedirectResponse(f"/executions/{execution.id}", 303)
@@ -524,14 +534,14 @@ def execution_review(
     return templates.TemplateResponse(request, "execution.html", {
         "execution_record": execution,
         "execution_data": serialize_execution(execution),
-        "approval_token": approval_token(execution) if execution.status == "awaiting_approval" else None,
+        "approval_token": approval_token(execution) if execution.status == "awaiting_approval" and execution.tool_name in {"append_row_to_configured_table", "create_demo_execution_receipt"} else None,
         "can_cancel": execution.status in CANCELLABLE_STATUSES,
         "terminal": execution.status in TERMINAL_STATUSES,
         "current_user": current_user,
     })
 
 
-@app.post("/executions/{execution_id}/approve")
+@app.post("/executions/{execution_id}/approve", dependencies=[Depends(require_action_csrf)])
 def execution_approve(
     execution_id: int,
     plan_hash: str = Form(...),
@@ -547,7 +557,7 @@ def execution_approve(
     return RedirectResponse(f"/executions/{execution.id}", 303)
 
 
-@app.post("/executions/{execution_id}/cancel")
+@app.post("/executions/{execution_id}/cancel", dependencies=[Depends(require_action_csrf)])
 def execution_cancel(
     execution_id: int,
     db: Session = Depends(get_db),
@@ -584,7 +594,7 @@ def execution_events(
                 "id": event.id,
                 "event_type": event.event_type,
                 "status": event.status,
-                "message": event.message,
+                "message": event.event_type.replace("_", " "),
                 "created_at": event.created_at.isoformat(),
             }
             for event in execution.events

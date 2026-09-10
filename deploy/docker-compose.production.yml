@@ -30,10 +30,18 @@ services:
       GMAIL_CLIENT_SECRET: ${GMAIL_CLIENT_SECRET:?GMAIL_CLIENT_SECRET is required}
       GMAIL_REDIRECT_URI: https://actioninboxapp.com/auth/google/callback
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:?TOKEN_ENCRYPTION_KEY is required}
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/actioninbox-google-service-account.json
       REPOSITORY_ORIGIN: https://github.com/a0527645787-oss/action-inbox-build-week.git
       ACTIONINBOX_SHEETS_ENABLED: ${ACTIONINBOX_SHEETS_ENABLED:-false}
       ACTIONINBOX_SHEET_ID: ${ACTIONINBOX_SHEET_ID:-}
       ACTIONINBOX_SHEET_TAB: ${ACTIONINBOX_SHEET_TAB:-}
+    volumes:
+      - type: bind
+        source: ${GOOGLE_APPLICATION_CREDENTIALS:-/dev/null}
+        target: /run/secrets/actioninbox-google-service-account.json
+        read_only: true
+        bind:
+          create_host_path: false
     depends_on:
       mysql:
         condition: service_healthy
