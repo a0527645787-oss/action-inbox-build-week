@@ -180,6 +180,12 @@ jobs:
                   'wait_for_worker gmail-sync-worker "Gmail sync worker"; '
                   'wait_for_worker execution-worker "Execution worker"'
               ),
+              # Refresh nginx's resolved upstream after actioninbox may have been recreated.
+              (
+                  'sudo docker compose --env-file /opt/actioninbox/.env '
+                  '-f deploy/docker-compose.production.yml restart nginx'
+              ),
+              'wait_for_worker nginx "Nginx"',
               (
                   'http_status=$(curl --silent --show-error --output /dev/null '
                   '--write-out "%{http_code}" '
