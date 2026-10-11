@@ -131,3 +131,23 @@ The emergency AWS deployment is served at
 Nginx container with a Let's Encrypt certificate; MySQL remains private on the
 internal Docker network. Deployment and renewal details are in
 `deploy/README.md`.
+
+## Configured table actions
+
+Settings → Tables accepts a name, an existing Google Sheets link, and its exact tab name. Share the spreadsheet manually with the existing service account first; this workflow neither creates credentials nor changes Google permissions. Inspect the live headers, map each column, and save. One column must map to the ActionInbox tracking key. A dedicated tab with unique headers in row 1 is required.
+
+On a task, select **Add to a table**, choose a destination (a unique compatible destination is recommended), review the meaningful values, then explicitly approve once. Preparation validates the live schema. The worker checks the configured destination and schema again, appends only the frozen ordered values using RAW input, and verifies every cell by read-back. Google IDs, credential paths, and source identifiers are omitted from public plan/status/receipt projections. Technical audit details are collapsed.
+
+Migration `20260910_0007` adds table destinations, generic append receipts, and an append-attempt timestamp. It adapts the existing environment-configured Expenses target into per-user destination metadata. Its headers must pass live validation before a proposal can be prepared. Historical executions and Sheets receipts are left unchanged. Old invoice tools are no longer eligible for approval or worker execution. New destinations use no environment-specific target configuration.
+
+A task can add one row per physical table. Repeated preparation returns the existing action, including terminal history, without retrying or changing it. A provider timeout after sending an append is treated as uncertain: bounded retries search for the tracking key and read back the original row, never blindly repeat the write. If the row cannot be confirmed, the action stops for human review. This deliberately favors duplicate prevention over automatic recovery from an uncertain unsent request.
+
+The web process mounts the same existing credential file read-only for header inspection and obtains a read-only Google scope. Only the approved execution worker requests write scope. No credential file contents or sharing permissions are changed. GitHub Actions is the authoritative test/build/deployment gate; the production job deploys only after tests and image build succeed.
+
+## Inbox progress and sync timings
+
+Browser sync submissions return to the Inbox; JavaScript requests explicitly ask for JSON and poll a shared progress component. The enqueue request does no Gmail fetch or AI analysis. A single active job per credential remains enforced. Without JavaScript, the Inbox shows durable progress and a refresh link.
+
+The worker imports unseen messages, then analyzes only emails assigned to that job. At most two independent analysis calls run together, with detached inputs, unchanged exact-evidence validation, and ordered database writes on the worker session. Attempt markers prevent automatic re-analysis on recovery. Existing processed emails and all table proposals are excluded. Failed new-email analysis remains available for explicit review from the Inbox. Gmail detail fetch concurrency remains four. The worker now uses the existing OpenAI key; Google credentials and scopes are unchanged.
+
+`gmail_sync_jobs` records aggregate `fetch_ms`, `storage_ms`, `triage_ms`, and initial `queue_wait_ms`. Logs contain timings and counts only. Historical jobs have no stage timings; zero defaults must not be interpreted as measured durations. The deployment pipeline reads aggregate historical timings before and after deployment without initiating sync. `scripts/benchmark_sync.py` compares one versus two analysis calls on six synthetic emails with a fixed mocked provider delay. This is a controlled concurrency benchmark, not a claim about live Gmail/OpenAI speed.

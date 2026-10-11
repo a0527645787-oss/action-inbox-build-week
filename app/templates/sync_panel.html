@@ -1,0 +1,13 @@
+<section class="card sync-panel" data-sync-panel data-status-url="{% if latest_job %}/gmail/sync/{{ latest_job.id }}{% endif %}" data-active="{{ 'true' if sync_view.active else 'false' }}">
+  <div><h2>Your latest emails, made useful</h2><p>Check for new messages and find what needs your attention. Your Gmail stays unchanged.</p></div>
+  {% if credential %}
+  <form method="post" action="/gmail/sync" data-sync-form>
+    <input type="hidden" name="csrf" value="{{ csrf_token(request) }}">
+    <button class="button" type="submit" {% if sync_view.active %}disabled{% endif %}>{{ 'Checking new emails…' if sync_view.active else ('Try again' if sync_view.failed else 'Check for new emails') }}</button>
+  </form>
+  <p id="gmail-sync-progress" data-sync-message role="status" aria-live="polite">{% if request.query_params.get('sync_error') %}We couldn’t start checking. Please check your connection and try again.{% else %}{{ sync_view.message }}{% endif %}</p>
+  <a href="/dashboard" data-sync-tasks {% if not latest_job or not latest_job.tasks_created %}hidden{% endif %}>View your tasks →</a>
+  <a href="/gmail" data-sync-reconnect {% if not sync_view.reconnect %}hidden{% endif %}>Review Gmail connection</a>
+  <noscript><p>Checking continues in the background. <a href="/inbox">Refresh to see the result</a>.</p></noscript>
+  {% else %}<p>Connect Gmail to check for new emails.</p><a class="button" href="/auth/google/start">Connect Gmail</a>{% endif %}
+</section>

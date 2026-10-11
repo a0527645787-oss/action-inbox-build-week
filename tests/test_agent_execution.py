@@ -1,4 +1,6 @@
 import json
+import hashlib
+import hmac
 from datetime import UTC, datetime
 
 import pytest
@@ -24,7 +26,8 @@ def _client(db, user):
         yield db
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[get_current_user] = lambda: user
-    return TestClient(app, base_url="https://testserver")
+    token = hmac.new(b"test-session-secret-at-least-thirty-two-bytes", b"action-csrf:", hashlib.sha256).hexdigest()
+    return TestClient(app, base_url="https://testserver", headers={"X-CSRF-Token": token})
 
 
 def _task(db, suffix="1"):
@@ -108,7 +111,7 @@ def test_wrong_plan_hash_cancel_transitions_and_failure_are_safe(db):
 
     result = process_next_execution(db, agent_runner=fail_safely)
     assert result.status == "failed"
-    assert "TimeoutError" in result.error_message
+    assert "could not be completed safely" in result.error_message
     assert "secret-shaped" not in result.error_message
     assert task.completed_at is None
 

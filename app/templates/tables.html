@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Table settings · ActionInbox{% endblock %}
+{% block content %}
+<h1>Table destinations</h1>
+{% if error %}<p class="card notice" role="alert">{{ error }}</p><p><a href="/settings/tables">Back to tables</a></p>{% endif %}
+{% if destination %}
+<section class="card section-stack"><h2>Map fields for {{ destination.display_name }}</h2>
+<p>Choose what each column receives. Map one column to the ActionInbox tracking key so retries cannot duplicate a row.</p>
+<form method="post" action="/settings/tables/{{ destination.id }}/save" class="section-stack"><input type="hidden" name="csrf" value="{{ csrf_token(request) }}">
+<input type="hidden" name="inspected_schema" value="{{ inspected_schema }}">
+{% for header in headers %}{% set index = loop.index0 %}
+<label>{{ header }} <select name="field" required>{% for key, label in fields.items() %}<option value="{{ key }}" {{ 'selected' if mapping[index] == key else '' }}>{{ label }}</option>{% endfor %}</select></label>
+{% endfor %}
+<label><input type="checkbox" name="enabled" value="true" checked> Enable this destination</label>
+<button class="button" type="submit">Save table</button></form></section>
+{% else %}
+{% if destinations %}<section class="card section-stack"><h2>Your tables</h2><ul>
+{% for d in destinations %}<li><a href="/settings/tables/{{ d.id }}">{{ d.display_name }}</a> · {{ 'Enabled' if d.enabled else 'Disabled / needs mapping' }}
+{% if d.enabled %}<form method="post" action="/settings/tables/{{ d.id }}/disable"><input type="hidden" name="csrf" value="{{ csrf_token(request) }}"><button class="text-button" type="submit">Disable</button></form>{% endif %}</li>{% endfor %}
+</ul></section>{% endif %}
+<section class="card section-stack"><h2>Connect a table</h2>
+<p>First share this spreadsheet with your organization's existing ActionInbox Google connection. Then paste its link below.</p>
+<p>Use a dedicated tab with headers in row 1, no merged cells, and one column for the ActionInbox tracking key.</p>
+<form method="post" action="/settings/tables/inspect" class="section-stack"><input type="hidden" name="csrf" value="{{ csrf_token(request) }}">
+<label>Name <input name="name" maxlength="100" required placeholder="Orders"></label>
+<label>Google Sheets link <input type="url" name="sheet_url" autocomplete="off" required placeholder="Paste the spreadsheet link"></label>
+<label>Tab name <input name="tab" maxlength="100" required></label>
+<button class="button" type="submit">Inspect headers</button></form></section>
+{% endif %}
+{% endblock %}

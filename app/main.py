@@ -5,6 +5,9 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -38,21 +41,25 @@ from .agent_execution import (
     serialize_execution,
 )
 from .execution import PACKAGE_EXECUTORS, build_execution_package, package_as_text, parse_structured_result
+from .table_actions import TableError, destinations_for, recommend_destination
+from .table_routes import router as table_router
+from .action_csrf import csrf_token, require_action_csrf
+from .presentation import ACTION_LABELS, task_presentation, sync_presentation
 from .gmail import (
-    GMAIL_MESSAGE_LIMIT,
+    GMAIL_BOOTSTRAP_PAGE_LIMIT,
+    GMAIL_DETAIL_CONCURRENCY,
+    GMAIL_PAGE_SIZE,
     GMAIL_QUERY,
     GMAIL_SCOPE,
-    GMAIL_TASK_LIMIT,
-    GmailReconnectRequired,
     GmailSyncError,
     begin_oauth,
     complete_oauth,
     disconnect_gmail,
+    enqueue_gmail_sync,
     gmail_configured,
-    sync_gmail,
 )
 from .mcp import handle_mcp
-from .models import BusinessResource, Email, Execution, ExecutionEvent, GmailCredential, Task, User, utcnow
+from .models import BusinessResource, Email, Execution, ExecutionEvent, GmailCredential, GmailSyncJob, Task, User, utcnow
 from .resources import MAX_RESOURCE_CHARS, RESOURCE_TYPES, seed_demo_resources
 from .triage import triage_unanalyzed_emails
 
@@ -68,8 +75,31 @@ async def lifespan(app):
 
 
 app = FastAPI(title="ActionInbox", lifespan=lifespan)
+app.include_router(table_router)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 templates = Jinja2Templates(directory=ROOT / "templates")
+templates.env.globals["csrf_token"] = csrf_token
+templates.env.globals["action_labels"] = ACTION_LABELS
+
+
+def _browser_form(request):
+    return request.method == "POST" and "text/html" in request.headers.get("accept", "") and request.url.path.startswith(("/gmail/sync", "/executions/", "/settings/tables", "/tasks/"))
+
+
+@app.exception_handler(StarletteHTTPException)
+async def friendly_form_error(request, exc):
+    if _browser_form(request):
+        if request.url.path == "/gmail/sync":
+            return RedirectResponse("/inbox?sync_error=reload", 303)
+        return templates.TemplateResponse(request, "form_error.html", {}, status_code=exc.status_code)
+    return await http_exception_handler(request, exc)
+
+
+@app.exception_handler(RequestValidationError)
+async def friendly_form_validation(request, exc):
+    if _browser_form(request):
+        return templates.TemplateResponse(request, "form_error.html", {}, status_code=422)
+    return await request_validation_exception_handler(request, exc)
 
 
 @app.get("/health")
@@ -122,23 +152,28 @@ def inbox(request: Request, db: Session = Depends(get_db), current_user: User = 
     if current_user.id == DEMO_USER_ID:
         query = query.where(Email.source == "demo")
     emails = db.scalars(query.order_by(Email.received_at.desc())).all()
+    credential = db.scalar(select(GmailCredential).where(GmailCredential.user_id == current_user.id))
+    latest_job = db.scalar(select(GmailSyncJob).where(GmailSyncJob.user_id == current_user.id).order_by(GmailSyncJob.id.desc()))
     return templates.TemplateResponse(
         request,
         "inbox.html",
-        {"emails": emails, "current_user": current_user, "is_demo": current_user.id == DEMO_USER_ID},
+        {"emails": emails, "current_user": current_user, "is_demo": current_user.id == DEMO_USER_ID, "credential": credential, "latest_job": latest_job, "sync_view": sync_presentation(latest_job)},
     )
 
 
 @app.get("/gmail")
-def gmail_page(request: Request, candidates: int = 0, imported: int = 0, tasks_created: int = 0, failures: int = 0,
-               reconnect: int = 0, sync_error: int = 0, db: Session = Depends(get_db),
+def gmail_page(request: Request, reconnect: int = 0, sync_error: int = 0, db: Session = Depends(get_db),
                current_user: User = Depends(require_personal_user)):
     credential = db.scalar(select(GmailCredential).where(GmailCredential.user_id == current_user.id).order_by(GmailCredential.updated_at.desc()))
+    latest_job = db.scalar(select(GmailSyncJob).where(
+        GmailSyncJob.user_id == current_user.id,
+        GmailSyncJob.credential_id == credential.id,
+    ).order_by(GmailSyncJob.id.desc())) if credential else None
     return templates.TemplateResponse(request, "gmail.html", {"credential": credential, "configured": gmail_configured(),
-        "scope": GMAIL_SCOPE, "query": GMAIL_QUERY, "message_limit": GMAIL_MESSAGE_LIMIT, "task_limit": GMAIL_TASK_LIMIT,
-        "candidates": max(candidates, 0), "imported": max(imported, 0), "tasks_created": max(tasks_created, 0),
-        "failures": max(failures, 0), "reconnect": bool(reconnect), "sync_error": bool(sync_error),
-        "current_user": current_user})
+        "scope": GMAIL_SCOPE, "query": GMAIL_QUERY, "page_size": GMAIL_PAGE_SIZE,
+        "bootstrap_page_limit": GMAIL_BOOTSTRAP_PAGE_LIMIT, "detail_concurrency": GMAIL_DETAIL_CONCURRENCY,
+        "reconnect": bool(reconnect), "sync_error": bool(sync_error),
+        "latest_job": latest_job, "sync_view": sync_presentation(latest_job), "current_user": current_user})
 
 
 @app.get("/gmail/status")
@@ -189,25 +224,50 @@ def gmail_oauth_callback(
     return response
 
 
-@app.post("/gmail/sync")
-def gmail_sync(db: Session = Depends(get_db), current_user: User = Depends(require_personal_user)):
+@app.post("/gmail/sync", dependencies=[Depends(require_action_csrf)])
+def gmail_sync(request: Request, db: Session = Depends(get_db), current_user: User = Depends(require_personal_user)):
     credential = db.scalar(select(GmailCredential).where(GmailCredential.user_id == current_user.id).order_by(GmailCredential.updated_at.desc()))
+    wants_json = "application/json" in request.headers.get("accept", "")
     if not credential:
-        raise HTTPException(409, "Connect Gmail before syncing")
+        if not wants_json:
+            return RedirectResponse("/inbox?sync_error=connect", 303)
+        return JSONResponse({"message": "Connect Gmail to check for new emails."}, status_code=409)
     try:
-        result = sync_gmail(db, current_user, credential)
-    except GmailReconnectRequired:
-        db.delete(credential)
-        db.commit()
-        return RedirectResponse("/gmail?reconnect=1", 303)
-    except GmailSyncError as exc:
-        logger.exception(
-            "Gmail sync failed user_fingerprint=%s exception_class=%s",
-            hashlib.sha256(current_user.id.encode()).hexdigest()[:12],
-            type(exc).__name__,
-        )
-        return RedirectResponse("/gmail?sync_error=1", 303)
-    return RedirectResponse(f"/gmail?candidates={result.candidates}&imported={result.new_messages}&tasks_created={result.tasks_created}&failures={result.analysis_failures}", 303)
+        job = enqueue_gmail_sync(db, current_user, credential)
+    except Exception:
+        db.rollback()
+        if not wants_json:
+            return RedirectResponse("/inbox?sync_error=queue", 303)
+        return JSONResponse({"message": "We couldn’t start checking your emails. Please try again."}, status_code=409)
+    if not wants_json:
+        return RedirectResponse("/inbox", 303)
+    status_url = f"/gmail/sync/{job.id}"
+    return JSONResponse({"job_id": job.id, "status": job.status, "status_url": status_url, **sync_presentation(job)}, status_code=202, headers={"Location": status_url})
+
+
+@app.get("/gmail/sync/{job_id}")
+def gmail_sync_status(job_id: int, request: Request, db: Session = Depends(get_db), current_user: User = Depends(require_personal_user)):
+    job = db.scalar(select(GmailSyncJob).where(GmailSyncJob.id == job_id, GmailSyncJob.user_id == current_user.id))
+    if not job:
+        raise HTTPException(404, "Gmail sync job not found")
+    if "text/html" in request.headers.get("accept", ""):
+        return RedirectResponse("/inbox", 303)
+    return JSONResponse({
+        "id": job.id,
+        **sync_presentation(job),
+        "tasks_created": job.tasks_created,
+        "status": job.status,
+        "mode": job.mode,
+        "pages_listed": job.pages_listed,
+        "candidates": job.candidates,
+        "details_fetched": job.details_fetched,
+        "imported": job.imported,
+        "duplicates": job.duplicates,
+        "skipped": job.skipped,
+        "failures": job.failures,
+
+        "updated_at": (job.heartbeat_at or job.created_at).isoformat(),
+    })
 
 
 @app.post("/gmail/disconnect")
@@ -363,7 +423,13 @@ def _owned_task(db: Session, task_id: int, user_id: str) -> Task:
 
 
 @app.get("/tasks/{task_id}")
-def task_detail(task_id: int, request: Request, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def task_detail(
+    task_id: int,
+    request: Request,
+    proposal_error: int = 0,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     task = _owned_task(db, task_id, current_user.id)
     before, evidence, after = highlighted_parts(task.email)
     guidance_views = []
@@ -394,7 +460,9 @@ def task_detail(task_id: int, request: Request, db: Session = Depends(get_db), c
         .where(Execution.task_id == task.id, Execution.user_id == current_user.id)
         .order_by(Execution.id.desc())
     ).all()
+    destinations = destinations_for(db, current_user.id)
     return templates.TemplateResponse(request, "task.html", {
+        "task_view": task_presentation(task, result, destinations),
         "task": task,
         "before": before,
         "evidence": evidence,
@@ -404,6 +472,9 @@ def task_detail(task_id: int, request: Request, db: Session = Depends(get_db), c
         "execution": result.execution_guidance,
         "executions": executions,
         "execution_idempotency_key": str(uuid4()),
+        "table_destinations": destinations,
+        "recommended_destination": recommend_destination(task, destinations),
+        "proposal_error": bool(proposal_error),
         "current_user": current_user,
     })
 
@@ -468,10 +539,12 @@ def _owned_execution(db: Session, execution_id: int, user_id: str) -> Execution:
     return execution
 
 
-@app.post("/tasks/{task_id}/execution-plan")
+@app.post("/tasks/{task_id}/execution-plan", dependencies=[Depends(require_action_csrf)])
 def execution_plan(
     task_id: int,
+    request: Request,
     idempotency_key: str = Form(...),
+    destination_id: int | None = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -479,7 +552,18 @@ def execution_plan(
     key = idempotency_key.strip()
     if not key or len(key) > 100:
         raise HTTPException(422, "Invalid idempotency key")
-    execution = create_execution(db, task, key)
+    try:
+        if task.email.source == "gmail" and destination_id is None:
+            raise TableError("Choose a configured table first.")
+        execution = create_execution(db, task, key, destination_id)
+    except TableError as exc:
+        db.rollback()
+        return templates.TemplateResponse(request, "action_error.html", {
+            "current_user": current_user, "message": str(exc), "task_id": task.id,
+        }, status_code=422)
+    except ValueError:
+        db.rollback()
+        return RedirectResponse(f"/tasks/{task.id}?proposal_error=1", 303)
     return RedirectResponse(f"/executions/{execution.id}", 303)
 
 
@@ -494,14 +578,14 @@ def execution_review(
     return templates.TemplateResponse(request, "execution.html", {
         "execution_record": execution,
         "execution_data": serialize_execution(execution),
-        "approval_token": approval_token(execution) if execution.status == "awaiting_approval" else None,
+        "approval_token": approval_token(execution) if execution.status == "awaiting_approval" and execution.tool_name in {"append_row_to_configured_table", "create_demo_execution_receipt"} else None,
         "can_cancel": execution.status in CANCELLABLE_STATUSES,
         "terminal": execution.status in TERMINAL_STATUSES,
         "current_user": current_user,
     })
 
 
-@app.post("/executions/{execution_id}/approve")
+@app.post("/executions/{execution_id}/approve", dependencies=[Depends(require_action_csrf)])
 def execution_approve(
     execution_id: int,
     plan_hash: str = Form(...),
@@ -517,7 +601,7 @@ def execution_approve(
     return RedirectResponse(f"/executions/{execution.id}", 303)
 
 
-@app.post("/executions/{execution_id}/cancel")
+@app.post("/executions/{execution_id}/cancel", dependencies=[Depends(require_action_csrf)])
 def execution_cancel(
     execution_id: int,
     db: Session = Depends(get_db),
@@ -554,7 +638,7 @@ def execution_events(
                 "id": event.id,
                 "event_type": event.event_type,
                 "status": event.status,
-                "message": event.message,
+                "message": event.event_type.replace("_", " "),
                 "created_at": event.created_at.isoformat(),
             }
             for event in execution.events

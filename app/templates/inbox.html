@@ -5,24 +5,12 @@
   <div>
     <span class="eyebrow">{{ 'Safe demo' if is_demo else 'Personal inbox' }}</span>
     <h1>Inbox</h1>
-    <p>{{ 'Only five synthetic messages are shown. No Gmail account is used.' if is_demo else 'Your read-only Gmail sync imports new INBOX messages only when requested.' }}</p>
+    <p>{{ 'Only five synthetic messages are shown. No Gmail account is used.' if is_demo else 'New messages and the tasks they bring, all in one place.' }}</p>
   </div>
   <a class="button secondary" href="/dashboard">View tasks</a>
 </div>
-<section class="card inbox-check">
-  {% if is_demo %}
-  <h2>Safe synthetic demo</h2>
-  <p>These messages are synthetic and isolated from every Gmail connection.</p>
-  <a class="button" href="/auth/google/start">Connect your own Gmail</a>
-  {% else %}
-  <h2>Manual read-only Gmail sync</h2>
-  <p>Fetch new messages from INBOX, store only unseen messages, then triage only that sync batch.</p>
-  <form method="post" action="/gmail/sync">
-    <button class="button" type="submit">Check for new emails</button>
-  </form>
-  {% endif %}
-</section>
-<section class="list">
+{% if not is_demo %}{% include "sync_panel.html" %}{% endif %}
+<section class="list" data-email-list>
   {% for email in emails %}
   <a class="email-row" href="/emails/{{ email.id }}">
     <div class="avatar">{{ email.sender[0]|upper }}</div>

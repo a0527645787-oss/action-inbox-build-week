@@ -40,6 +40,8 @@ class Email(Base):
     gmail_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     gmail_thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     analyzed: Mapped[bool] = mapped_column(Boolean, default=False)
+    sync_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    sync_analysis_attempted: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     analysis: Mapped["Analysis | None"] = relationship(back_populates="email", cascade="all, delete-orphan", uselist=False)
     task: Mapped["Task | None"] = relationship(back_populates="email", cascade="all, delete-orphan", uselist=False)
 
@@ -86,12 +88,14 @@ class Task(Base):
     completed_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
     email: Mapped[Email] = relationship(back_populates="task")
     executions: Mapped[list["Execution"]] = relationship(back_populates="task", cascade="all, delete-orphan")
+    sheet_append_record: Mapped["SheetAppendRecord | None"] = relationship(back_populates="task", cascade="all, delete-orphan", uselist=False)
 
 
 class Execution(Base):
     __tablename__ = "executions"
     __table_args__ = (
         UniqueConstraint("user_id", "idempotency_key", name="uq_executions_user_idempotency"),
+        UniqueConstraint("user_id", "task_id", "sheet_proposal_slot", name="uq_executions_sheet_task"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -104,11 +108,16 @@ class Execution(Base):
     result: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(100))
+    sheet_proposal_slot: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    append_attempted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     task: Mapped[Task] = relationship(back_populates="executions")
     events: Mapped[list["ExecutionEvent"]] = relationship(
         back_populates="execution",
@@ -129,6 +138,33 @@ class ExecutionEvent(Base):
     safe_metadata: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     execution: Mapped[Execution] = relationship(back_populates="events")
+
+
+class TableDestination(Base):
+    __tablename__ = "table_destinations"
+    __table_args__ = (UniqueConstraint("user_id", "target", "tab_name", name="uq_table_destination_target"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    connector_kind: Mapped[str] = mapped_column(String(40), default="google_sheets")
+    display_name: Mapped[str] = mapped_column(String(100))
+    target: Mapped[str] = mapped_column(String(160))
+    tab_name: Mapped[str] = mapped_column(String(100))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    schema_snapshot: Mapped[str] = mapped_column(Text)
+    column_mapping: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class TableAppendRecord(Base):
+    __tablename__ = "table_append_records"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    action_key: Mapped[str] = mapped_column(String(80), unique=True)
+    execution_id: Mapped[int] = mapped_column(ForeignKey("executions.id"), unique=True)
+    destination_id: Mapped[int] = mapped_column(ForeignKey("table_destinations.id"))
+    row_number: Mapped[int] = mapped_column(Integer)
+    row_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class BusinessResource(Base):
@@ -156,8 +192,70 @@ class GmailCredential(Base):
     encrypted_token: Mapped[str] = mapped_column(Text)
     scopes: Mapped[str] = mapped_column(Text)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    history_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    bootstrap_page_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class GmailSyncJob(Base):
+    __tablename__ = "gmail_sync_jobs"
+    __table_args__ = (
+        UniqueConstraint("credential_id", "active_slot", name="uq_gmail_sync_active_credential"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    credential_id: Mapped[int] = mapped_column(ForeignKey("gmail_credentials.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    active_slot: Mapped[int | None] = mapped_column(Integer, default=1, nullable=True)
+    mode: Mapped[str] = mapped_column(String(30), default="bootstrap")
+    page_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    start_history_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    pending_history_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    pages_listed: Mapped[int] = mapped_column(Integer, default=0)
+    candidates: Mapped[int] = mapped_column(Integer, default=0)
+    details_fetched: Mapped[int] = mapped_column(Integer, default=0)
+    imported: Mapped[int] = mapped_column(Integer, default=0)
+    duplicates: Mapped[int] = mapped_column(Integer, default=0)
+    skipped: Mapped[int] = mapped_column(Integer, default=0)
+    failures: Mapped[int] = mapped_column(Integer, default=0)
+    tasks_created: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    analysis_failures: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    phase: Mapped[str] = mapped_column(String(30), default="waiting", server_default="waiting")
+    fetch_ms: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    storage_ms: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    triage_ms: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    queue_wait_ms: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    safe_error: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class SheetAppendRecord(Base):
+    __tablename__ = "sheet_append_records"
+    __table_args__ = (
+        UniqueConstraint("proposal_id", name="uq_sheet_append_proposal"),
+        UniqueConstraint("user_id", "task_id", name="uq_sheet_append_user_task"),
+        UniqueConstraint("execution_id", name="uq_sheet_append_execution"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    proposal_id: Mapped[str] = mapped_column(String(80))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    execution_id: Mapped[int] = mapped_column(ForeignKey("executions.id", ondelete="CASCADE"), index=True)
+    spreadsheet_id: Mapped[str] = mapped_column(String(255))
+    sheet_tab: Mapped[str] = mapped_column(String(255))
+    sheet_range: Mapped[str] = mapped_column(String(255))
+    row_hash: Mapped[str] = mapped_column(String(64))
+    verification_status: Mapped[str] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    task: Mapped[Task] = relationship(back_populates="sheet_append_record")
 
 
 class GmailOAuthState(Base):

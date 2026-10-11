@@ -1,74 +1,26 @@
 {% extends "base.html" %}
-{% block title %}Execution #{{ execution_record.id }} · ActionInbox{% endblock %}
+{% block title %}Review action · ActionInbox{% endblock %}
 {% block content %}
-<a class="back" href="/tasks/{{ execution_record.task_id }}">← Task</a>
-<div class="heading">
-  <div>
-    <span class="eyebrow">ActionInbox Agent</span>
-    <h1>Execution #{{ execution_record.id }}</h1>
-    <p>Review the frozen plan before approving it. Approval is explicit and can be used only once.</p>
-  </div>
-  <span class="badge {{ 'done' if execution_record.status == 'succeeded' else '' }}" id="execution-status">{{ execution_record.status|replace('_',' ') }}</span>
+<div class="task-focus">
+<a class="back" href="/tasks/{{ execution_record.task_id }}">← Back to task</a>
+<section class="card">
+<span class="eyebrow" id="execution-status" data-status="{{ execution_record.status }}">{{ action_labels.get(execution_record.status, 'Recorded action') }}</span>
+<h1>{{ 'Added to' if execution_record.status == 'completed_verified' else 'Add to' }} {{ execution_data.plan.destination_name }}</h1>
+<p>{{ execution_data.plan.summary }}</p>
+<dl class="preview-values">{% for item in execution_data.plan.preview %}<dt>{{ item.column }}</dt><dd>{{ item.value }}</dd>{% endfor %}</dl>
+{% if approval_token %}
+<p>We’ll add these values to your table and check that they saved correctly.</p>
+<form method="post" action="/executions/{{ execution_record.id }}/approve">
+<input type="hidden" name="csrf" value="{{ csrf_token(request) }}"><input type="hidden" name="plan_hash" value="{{ execution_record.plan_hash }}"><input type="hidden" name="approval" value="{{ approval_token }}">
+<button class="button" type="submit">Approve and add row once</button></form>
+{% endif %}
+{% if can_cancel %}<form method="post" action="/executions/{{ execution_record.id }}/cancel"><input type="hidden" name="csrf" value="{{ csrf_token(request) }}"><button class="text-button" type="submit">Cancel</button></form>{% endif %}
+<div data-execution-status-url="/executions/{{ execution_record.id }}/status">
+{% if execution_data.result %}<p class="receipt-note">{{ execution_data.result.message }}</p>
+{% elif execution_data.error_message %}<p class="task-blocker">We couldn’t confirm that the row saved correctly. Please review your table before taking further action.</p>
+{% elif execution_record.status in ['queued', 'running'] %}<p class="receipt-note" role="status">We’re taking care of it. You can leave this page and come back.</p>{% endif %}
+</div></section>
+<details class="card"><summary>Technical details</summary><p>Plan fingerprint: <code>{{ execution_record.plan_hash }}</code></p><p>Tool: {{ execution_record.tool_name }}</p><p>Status: {{ execution_record.status }}</p>
+<ol>{% for event in execution_record.events %}<li>{{ event.event_type|replace('_', ' ') }} · {{ event.status|replace('_', ' ') }} · {{ event.created_at }}</li>{% endfor %}</ol></details>
 </div>
-
-<section class="card section-stack">
-  <h2>Execution plan</h2>
-  <ol>
-    {% for action in execution_data.plan.actions %}
-    <li><strong>{{ action.description }}</strong><br><small>Authorized tool: {{ action.tool }}</small></li>
-    {% endfor %}
-  </ol>
-  <div class="plan-grid">
-    <div><small>External services</small><strong>{{ execution_data.plan.external_services|join(', ') }}</strong></div>
-    <div><small>Risk</small><strong>{{ execution_data.plan.risk_level }}</strong></div>
-    <div><small>Reversible</small><strong>{{ 'Yes' if execution_data.plan.reversible else 'No' }}</strong></div>
-    <div><small>External side effects</small><strong>{{ 'Yes' if execution_data.plan.external_side_effects else 'No' }}</strong></div>
-  </div>
-  <h3>Information shared</h3>
-  <ul>{% for item in execution_data.plan.information_shared %}<li>{{ item }}</li>{% endfor %}</ul>
-  <h3>Required permission</h3>
-  <ul>{% for item in execution_data.plan.permissions_required %}<li>{{ item }}</li>{% endfor %}</ul>
-  <h3>Safety boundaries</h3>
-  <ul>{% for item in execution_data.plan.safety_notes %}<li>{{ item }}</li>{% endfor %}</ul>
-  <small>Frozen plan hash: <code>{{ execution_record.plan_hash }}</code></small>
-  {% if execution_record.status == "awaiting_approval" %}
-  <div class="actions">
-    <form method="post" action="/executions/{{ execution_record.id }}/approve">
-      <input type="hidden" name="plan_hash" value="{{ execution_record.plan_hash }}">
-      <input type="hidden" name="approval" value="{{ approval_token }}">
-      <button class="button" type="submit">Approve this plan once</button>
-    </form>
-    <form method="post" action="/executions/{{ execution_record.id }}/cancel">
-      <button class="button secondary" type="submit">Cancel</button>
-    </form>
-  </div>
-  {% elif can_cancel %}
-  <form method="post" action="/executions/{{ execution_record.id }}/cancel">
-    <button class="button secondary" type="submit">Cancel queued execution</button>
-  </form>
-  {% endif %}
-</section>
-
-<section class="card section-stack" data-execution-status-url="/executions/{{ execution_record.id }}/status">
-  <h2>Result</h2>
-  <div id="execution-result">
-    {% if execution_data.result %}
-    <p>{{ execution_data.result.message }}</p>
-    <p><strong>Receipt:</strong> #{{ execution_data.result.execution_id }} · {{ execution_data.result.tool_name }}</p>
-    {% elif execution_record.error_message %}
-    <p class="notice">{{ execution_record.error_message }}</p>
-    {% else %}
-    <p>No result yet. The durable worker runs only after approval.</p>
-    {% endif %}
-  </div>
-</section>
-
-<section class="card section-stack">
-  <h2>Audit events</h2>
-  <ol id="execution-events">
-    {% for event in execution_record.events %}
-    <li><strong>{{ event.event_type|replace('_',' ') }}</strong> · {{ event.status|replace('_',' ') }}<br>{{ event.message }}<br><small>{{ event.created_at }}</small></li>
-    {% endfor %}
-  </ol>
-</section>
 {% endblock %}

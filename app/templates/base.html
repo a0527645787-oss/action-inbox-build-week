@@ -18,6 +18,7 @@
   <link rel="stylesheet" href="/static/execution.css">
   <link rel="stylesheet" href="/static/integrations.css">
   <link rel="stylesheet" href="/static/agent.css">
+  <link rel="stylesheet" href="/static/experience.css">
   {% block page_styles %}{% endblock %}
 </head>
 <body>
@@ -30,6 +31,7 @@
     {% if current_user.id != "00000000-0000-0000-0000-000000000001" %}
     <a href="/gmail">Gmail</a>
     <a href="/resources">Resources</a>
+    <a href="/settings/tables">Tables</a>
     {% endif %}
     <a href="/integrations">Work &amp; Codex</a>
     <form method="post" action="/logout">
@@ -40,5 +42,6 @@
 </header>
 <main>{% block content %}{% endblock %}</main>
 <script src="/static/app.js"></script>
+<script src="/static/sync.js" defer></script>
 </body>
 </html>
